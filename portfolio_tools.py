@@ -1,3 +1,10 @@
+'''
+Library for portfolio optimization, strategy/portfolio performance evaluation, and other relevant toolkits. 
+
+'''
+
+
+
 from scipy.optimize import minimize as opt
 from backtest_tools import risk_analysis
 from scipy.optimize import Bounds
