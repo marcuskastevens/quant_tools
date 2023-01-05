@@ -1,4 +1,5 @@
 from scipy.optimize import minimize as opt
+from backtest_tools import risk_analysis
 from scipy.optimize import Bounds
 from scipy import stats
 import pandas as pd
@@ -28,7 +29,7 @@ def portfolio_sharpe_ratio(asset_weights, expected_returns, cov_matrix, neg = Tr
     
     return sharpe_ratio
 
-def mvo(hist_returns: pd.DataFrame, expected_returns: pd.DataFrame, target_vol = .01):
+def mvo(hist_returns: pd.DataFrame, expected_returns: pd.DataFrame, target_vol = .01, max_position_weight = .2, net_exposure = 1):
     """ Constrained or unconstrained Mean Variance Optimization. This leverages convex optimization to identify local minima which serve to minimize an objective function.
         In the context of portfolio optimization, our objective function is the negative portfolio SR. 
 
@@ -55,11 +56,15 @@ def mvo(hist_returns: pd.DataFrame, expected_returns: pd.DataFrame, target_vol =
         initial_guess = np.array([1 / n] * n)
         
         # Set max allocation per security
-        bounds = Bounds(-.2, .2)
+        bounds = Bounds(-max_position_weight, max_position_weight)
 
-        # Ensure full portfolio exposure (100%) and target volatility
-        constraints = [{"type": "eq", "fun": lambda vols: np.sum(vols) - 1}, 
-                        {"type": "eq", "fun": lambda vols: np.sqrt(np.dot(np.dot(vols.T, cov_matrix), vols)) - target_vol}]
+        if net_exposure is None:
+            # Target volatility
+            constraints = [{"type": "eq", "fun": lambda vols: np.sqrt(np.dot(np.dot(vols.T, cov_matrix), vols)) - target_vol}]
+        else:
+            # Constrain net portfolio exposure and target volatility
+            constraints = [{"type": "eq", "fun": lambda vols: np.sum(vols) - net_exposure}, 
+                            {"type": "eq", "fun": lambda vols: np.sqrt(np.dot(np.dot(vols.T, cov_matrix), vols)) - target_vol}]
 
         wts = pd.Series(opt(portfolio_sharpe_ratio, 
                 initial_guess,
@@ -92,6 +97,9 @@ def portfolio_stop_loss(strategy_returns: pd.Series, stop_loss_target = -.01, t_
     Returns:
         pd.Series: time-series of returns that accounts for stop-losses.
     """
+    # Create different pd.Series returns object than strategy_returns passed through to ensure no editing of strategy_returns 
+    # when function is called. This object will be returned by the function. 
+    stop_loss_strategy_returns = strategy_returns.dropna()
 
     # Acquire only date indeces, rather than date-time indices
     dates = np.array([])
@@ -121,7 +129,7 @@ def portfolio_stop_loss(strategy_returns: pd.Series, stop_loss_target = -.01, t_
             # Keep prior returns before exit_date_time if need be
             # Set exit_date_time = -.01 - sum(prior returns)
 
-            strategy_returns.loc[i] = 0
+            stop_loss_strategy_returns.loc[i] = 0
 
             # Get the date_time of when stop loss was triggered
             if len(stop_loss_rets) == 1:
@@ -137,20 +145,18 @@ def portfolio_stop_loss(strategy_returns: pd.Series, stop_loss_target = -.01, t_
                         next_day_index =str((pd.to_datetime(i) + pd.tseries.offsets.BDay(1)).date())
                         # Set next day's initial return to 0% since we liquidated the prior day's position
                         next_day_index = strategy_returns.loc[next_day_index].index[0]
-                        strategy_returns.loc[next_day_index] = 0.0
+                        stop_loss_strategy_returns.loc[next_day_index] = 0.0
                     except:
                         # May call exception if liquidation is on last day of returns data
                         print(f'Function portfolio_stop_loss: ensure {next_day_index} does not exist in strategy returns data')
                             
             # Realize losses at exit_date_time
-            strategy_returns.loc[exit_date_time] = stop_loss_target - t_costs
-            
-
-    
+            stop_loss_strategy_returns.loc[exit_date_time] = stop_loss_target - t_costs
+                
     # After all stop losses have been realized, return strategy's return pd.Series
-    return strategy_returns
+    return stop_loss_strategy_returns
 
-def get_daily_stop_loss_returns(intraday_asset_returns: pd.DataFrame, mvo_wts: pd.DataFrame, stop_loss_target = -.01, re_entry_eod = False) -> pd.DataFrame:
+def get_daily_stop_loss_returns(intraday_asset_returns: pd.DataFrame, mvo_wts: pd.DataFrame, stop_loss_target = -.01, t_costs = 0, re_entry_eod = False) -> pd.DataFrame:
     """ Generate daily strategy returns that incoporate a manager-specified daily strategy stop-loss target. This requires injestion of intraday data and
         MVO/strategy weights to determine stop-loss daily strategy returns. 
 
@@ -158,6 +164,7 @@ def get_daily_stop_loss_returns(intraday_asset_returns: pd.DataFrame, mvo_wts: p
         intraday_asset_returns (pd.DataFrame): _description_
         mvo_wts (pd.DataFrame): _description_
         stop_loss_target (float, optional): _description_. Defaults to -.005.
+        t_costs (float, optional): Defaults to 0.
         re_entry_eod (bool, optional): _description_. Defaults to False.
 
     Returns:
@@ -171,7 +178,7 @@ def get_daily_stop_loss_returns(intraday_asset_returns: pd.DataFrame, mvo_wts: p
     # Compute intraday returns
     intraday_strategy_returns = (intraday_asset_returns * intraday_wts).sum(1)
     # Compute intrday stop-loss returns
-    intraday_strategy_returns_stop_loss = portfolio_stop_loss(strategy_returns = intraday_strategy_returns, stop_loss_target = stop_loss_target, re_entry_eod = re_entry_eod)
+    intraday_strategy_returns_stop_loss = portfolio_stop_loss(strategy_returns = intraday_strategy_returns, stop_loss_target = stop_loss_target, t_costs = t_costs, re_entry_eod = re_entry_eod)
     
     # Convert intraday returns to daily returns - this makes it easier to compute strategy performance metrics (annualizing metrics)
     daily_strategy_returns_stop_loss = get_daily_rets_from_intraday(intraday_strategy_returns_stop_loss)
@@ -181,12 +188,39 @@ def get_daily_stop_loss_returns(intraday_asset_returns: pd.DataFrame, mvo_wts: p
 
 # ------------------------------------------------------------------------- Performance Metrics -------------------------------------------------------------------------
 
-# Get annualized volatility from daily returns
-def vol(strategy_returns: pd.Series) -> float:
-    """ Compute annualized volatility for any strategy/asset time-series of daily returns.
+# Get Compound Annual Growth Rate from daily returns
+def cagr(strategy_returns: pd.Series, log_rets = False) -> float:
+    """ Compute compound annual growth rate for any strategy/asset time series of daily returns.
 
     Args:
-        strategy_returns (pd.Series): time-series of daily returns.
+        strategy_returns (pd.Series): time series of daily returns.
+        log_rets (bool): indicates the nature of strategy returns (log returns vs. raw returns)
+
+    Returns:
+        float: CAGR.
+    """
+    strategy_returns = strategy_returns.dropna()
+
+    if log_rets: 
+        cum_rets = strategy_returns.cumsum()
+        portfolio_balance = cum_rets + 1
+        initial_balance = portfolio_balance.iloc[0]
+        final_balance = portfolio_balance.iloc[-1]
+        cagr = (final_balance/initial_balance) ** (1/(len(portfolio_balance)/252)) - 1
+    else:
+        portfolio_balance = (1+strategy_returns).cumprod()
+        initial_balance = portfolio_balance.iloc[0]
+        final_balance = portfolio_balance.iloc[-1]
+        cagr = (final_balance/initial_balance) ** (1/(len(portfolio_balance)/252)) - 1
+    
+    return cagr
+    
+# Get annualized volatility from daily returns
+def vol(strategy_returns: pd.Series) -> float:
+    """ Compute annualized volatility for any strategy/asset time series of daily returns.
+
+    Args:
+        strategy_returns (pd.Series): time series of daily returns.
 
     Returns:
         float: annualized volatility.
@@ -194,7 +228,6 @@ def vol(strategy_returns: pd.Series) -> float:
 
     return strategy_returns.std() * 252 ** .5
 
-# Get Sharpe Ratio of daily returns series
 def sharpe_ratio(strategy_returns: pd.Series) -> float:
     """ Compute annualized Sharpe Ratio for any strategy or security time-series of daily returns.
 
@@ -218,7 +251,48 @@ def sortino_ratio(strategy_returns: pd.Series) -> float:
         float: annualized Sharpe Ratio.
     """
     
-    return strategy_returns.mean() / strategy_returns[strategy_returns<0].std() * 252 ** .5
+    return strategy_returns.mean() / strategy_returns[strategy_returns<=0].std() * 252 ** .5
+
+def ulcer_index(strategy_returns: pd.Series) -> float:
+    """ Measure of downside or drawdown volatility (similar to std equation). 
+        This allows the manager to account for the severity and frequency of drawdowns.
+        This formulaically penalizes compounding/repeated drawdowns, and rewards less frequent drawdowns.
+
+        Formula: Ulcer Index = SQRT(SUM(Drawdowns^2) / N) ~ SQRT(MSE of Drawdowns)
+
+    Args:
+        strategy_returns (pd.Series): time-series of strategy/portfolio returns.
+
+    Returns:
+        float: _description_
+    """
+
+    # Get time-series of strategy/portfolio drawdowns
+    drawdowns = risk_analysis.get_drawdowns(strategy_returns)
+
+    # Compute Ulcer Index based on aforementioned formula
+    ulcer_index = np.sqrt((drawdowns**2).mean())
+
+    return ulcer_index
+
+def martin_ratio(strategy_returns: pd.Series) -> float:
+    """ Risk-adjusted return ratio that utilizes the Ulcer Index as the unit of risk.
+        Similar in nature to the Sortino ratio as it focuses on dowside risk.
+        Captures frequency and severity of drawdowns.
+
+        Formula: Martin Ratio = Strategy or Portfolio Return / Ulcer Index
+
+    Args:
+        strategy_returns (pd.Series): time-series of strategy/portfolio returns.
+
+    Returns:
+        float: _description_
+    """
+
+    # Get Ulcer Index of strategy/portfolio returns and compute Martin Ratio based on aforementioned formula
+    martin_ratio = strategy_returns.mean() / ulcer_index(strategy_returns) * 252 **.5
+
+    return martin_ratio
 
 def omega_ratio(strategy_returns: pd.Series, required_return=0.07, required_return_annual = True, verbose = True) -> (pd.Series, float, float):
 
@@ -394,6 +468,23 @@ def alpha_regression(strategy_returns: pd.Series, benchmark_returns: pd.Series) 
 
     return reg_summary
 
+# Get cumulative returns for either raw returns or log returns
+def cumulative_returns(strategy_returns: pd.Series, log_rets = False) -> pd.Series:
+    """_summary_
+
+    Args:
+        strategy_returns (pd.Series): _description_
+
+    Returns:
+        pd.Series: _description_
+    """
+    if log_rets:
+        cumulative_returns = strategy_returns.cumsum()
+    else:
+        cumulative_returns = (1 + strategy_returns).cumprod() - 1
+    
+    return cumulative_returns
+
 # Get Performance Summary
 def performance_summary(strategy_returns: pd.Series) -> pd.DataFrame:
     """ Generate pd.DataFrame of relevent strategy/portfolio performance data.
@@ -405,12 +496,20 @@ def performance_summary(strategy_returns: pd.Series) -> pd.DataFrame:
         pd.DataFrame: 
     """
 
+    # Get VaR statistics using kurtotic distribution
+    VaR, CVaR = risk_analysis.VaR(strategy_returns, use_laplace = True)
+    
     performance_summary = pd.Series({'Sharpe Ratio' : sharpe_ratio(strategy_returns), 
-                                    'Sortino Ratio' : sortino_ratio(strategy_returns), 
-                                    'Omega Ratio' : omega_ratio(strategy_returns, verbose=False), 
+                                    'CAGR' : cagr(strategy_returns),
                                     'Vol' : vol(strategy_returns),
+                                    'Sortino Ratio' : sortino_ratio(strategy_returns), 
+                                    'Martin (Ulcer) Ratio' : martin_ratio(strategy_returns),
+                                    'Omega Ratio' : omega_ratio(strategy_returns, verbose=False),
                                     'RR Ratio' : get_risk_ratio(strategy_returns), 
-                                    'Win Rate' : get_win_rate(strategy_returns),                           
+                                    'Win Rate' : get_win_rate(strategy_returns),     
+                                    'Max Drawdown' : risk_analysis.get_drawdowns(strategy_returns).min(),
+                                    'VaR - Laplace' : VaR,
+                                    'CVaR - Laplace' : CVaR                       
                                     })
 
     return performance_summary
@@ -503,7 +602,6 @@ def get_intraday_weights(asset_returns: pd.DataFrame, mvo_wts: pd.DataFrame) -> 
     
     # Get MVO / other targeted asset weights
     # Must convert dates to account for time-zone via "utc = True" argument in pd.to_datetime function
-    print(mvo_wts.index)
     mvo_wts.index = pd.to_datetime(mvo_wts.index, utc = True)
 
     # Apply MVO weights to intraday_wts pd.DataFrame
