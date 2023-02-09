@@ -3,11 +3,10 @@ Library for portfolio optimization, strategy/portfolio performance evaluation, a
 
 '''
 
-
-
 from scipy.optimize import minimize as opt
 from backtest_tools import risk_analysis
 from scipy.optimize import Bounds
+import statsmodels.api as sm
 from scipy import stats
 import pandas as pd
 import numpy as np
@@ -36,7 +35,7 @@ def portfolio_sharpe_ratio(asset_weights, expected_returns, cov_matrix, neg = Tr
     
     return sharpe_ratio
 
-def mvo(hist_returns: pd.DataFrame, expected_returns: pd.DataFrame, target_vol = .01, max_position_weight = .2, net_exposure = 1):
+def mvo(hist_returns: pd.DataFrame, expected_returns: pd.DataFrame, target_vol = .01, max_position_weight = .2, net_exposure = 1, market_bias = 0, constrained=True):
     """ Constrained or unconstrained Mean Variance Optimization. This leverages convex optimization to identify local minima which serve to minimize an objective function.
         In the context of portfolio optimization, our objective function is the negative portfolio SR. 
 
@@ -65,32 +64,124 @@ def mvo(hist_returns: pd.DataFrame, expected_returns: pd.DataFrame, target_vol =
         # Set max allocation per security
         bounds = Bounds(-max_position_weight, max_position_weight)
 
-        if net_exposure is None:
-            # Target volatility
-            constraints = [{"type": "eq", "fun": lambda vols: np.sqrt(np.dot(np.dot(vols.T, cov_matrix), vols)) - target_vol}]
-        else:
-            # Constrain net portfolio exposure and target volatility
-            constraints = [{"type": "eq", "fun": lambda vols: np.sum(vols) - net_exposure}, 
-                            {"type": "eq", "fun": lambda vols: np.sqrt(np.dot(np.dot(vols.T, cov_matrix), vols)) - target_vol}]
+        if constrained:
 
-        wts = pd.Series(opt(portfolio_sharpe_ratio, 
-                initial_guess,
-                args=(expected_returns, cov_matrix), 
-                method='SLSQP', 
-                bounds = bounds,
-                constraints=constraints)['x']
-            )
+            constraints =  [# Target volatility
+                            {"type": "eq", "fun": lambda vols: np.sqrt(np.dot(np.dot(vols.T, cov_matrix), vols)) - target_vol},
+                            
+                            # Ensure market neutral portfolio (or alternatively specified market bias)
+                            {"type": "eq", "fun": lambda vols: np.sum(vols) - market_bias},
+
+                            # Target Leverage (Net Exposure)
+                            {"type": "ineq", "fun": lambda vols: np.sum(np.abs(vols)) - (net_exposure - .01)}, # 0.99 <= weights.sum
+                            {"type": "ineq", "fun": lambda vols: (net_exposure + .01) - np.sum(np.abs(vols))}, # 1.01 >= weights.sum
+                            
+                            # DO NOT DO THIS - Restrict optimizer too much {"type": "eq", "fun": lambda vols: 1 - np.sum(np.abs(vols))}, # 1.1 >= weights.sum
+                            # 
+                            #
+                            # Eventually implement L/S Ratios 
+                            # SUM(ABS(SHORTS)) = C * SUM(LONGS)
+                            ]
+
+
+            mvo_weights = pd.Series(opt(portfolio_sharpe_ratio, 
+                    initial_guess,
+                    args=(expected_returns, cov_matrix), 
+                    method='SLSQP', 
+                    bounds = bounds,
+                    constraints=constraints)['x']
+                    )
+            
+        else:
+            mvo_weights = pd.Series(opt(portfolio_sharpe_ratio, 
+            initial_guess,
+            args=(expected_returns, cov_matrix), 
+            method='SLSQP', 
+            bounds = bounds)['x']
+            )             
 
         # Assign weights to assets
-        wts.index = vols.index
+        mvo_weights.index = vols.index
 
-        # print('Target Vol: ')
-        # print(np.sqrt(np.dot(np.dot(wts.T, cov_matrix), wts)))
+
+        # Compute absolute value of all vols, sum them together, and scale vols by 1 / (sum(abs(vols)))
+        # This ensures that the new sum of absolute values of vols = 1 (i.e., generates true weights or fractions of the portfolio to allocate per investment)
+        # mvo_weights = mvo_weights / np.sum(np.abs(mvo_weights))
+        
+        print('Target Vol: ')
+        print(np.sqrt(np.dot(np.dot(mvo_weights.T, cov_matrix), mvo_weights)))
+        
+        ls_ratio = np.abs(mvo_weights[mvo_weights>0].sum() / mvo_weights[mvo_weights<0].sum())
+        print(f'Long-Short Ratio: {ls_ratio}')
+        print(mvo_weights.sum())
 
         # mvo_sr = sharpe_ratio(wts, expected_returns, cov_matrix, neg=False)
         
-        return wts
+        return mvo_weights
     return
+
+# def mvo(hist_returns: pd.DataFrame, expected_returns: pd.Series, target_vol = .01, max_position_weight = .2, net_exposure = 1):
+#     """ Constrained or unconstrained Mean Variance Optimization. This leverages convex optimization to identify local minima which serve to minimize an objective function.
+#         In the context of portfolio optimization, our objective function is the negative portfolio SR. 
+
+#     Args:
+#         hist_returns (pd.DataFrame): expanding historical returns of specified asset universe
+#         expected_returns (pd.Series): expected returns across specified asset universe, normally computed via statistical model
+#         target_vol (float, optional): targeted ex-ante volatilty based on covariance matrix. Defaults to .10.
+
+#     Returns:
+#         _type_: _description_
+#     """
+
+#     # Match tickers across expected returns and historical returns
+#     expected_returns.dropna(inplace=True)
+#     hist_returns = hist_returns.loc[:, expected_returns.index]
+
+#     vols = hist_returns.std()*252**.5
+#     cov_matrix = hist_returns.cov()
+    
+#     n = hist_returns.columns.size
+#     if n > 0:
+        
+#         # Initial guess is naive 1/n portfolio
+#         initial_guess = np.array([1 / n] * n)
+        
+#         # Set max allocation per security
+#         bounds = Bounds(-max_position_weight, max_position_weight)
+
+#         if net_exposure is None:
+#                             # Target volatility
+#             constraints = [{"type": "eq", "fun": lambda vols: np.sqrt(np.dot(np.dot(vols.T, cov_matrix), vols)) - target_vol},
+#                             # Ensure market neutral portfolio
+#                            {"type": "eq", "fun": lambda vols: vols/np.sum(np.abs(vols)) - 0}]
+#         else:
+#                             # Constrain net portfolio exposure 
+#             constraints = [{"type": "eq", "fun": lambda vols: np.sum(np.abs(vols)) - net_exposure}, 
+#                             # Target volatility
+#                             {"type": "eq", "fun": lambda vols: np.sqrt(np.dot(np.dot(vols.T, cov_matrix), vols)) - target_vol},
+#                             # Ensure market neutral portfolio
+#                             {"type": "eq", "fun": lambda vols: np.sum(vols/np.sum(np.abs(vols))) - net_exposure}]
+
+#             print('Net Exposure Constraint Met')
+
+#         wts = pd.Series(opt(portfolio_sharpe_ratio, 
+#                 initial_guess,
+#                 args=(expected_returns, cov_matrix), 
+#                 method='SLSQP', 
+#                 bounds = bounds,
+#                 constraints=constraints)['x']
+#             )
+
+#         # Assign weights to assets
+#         wts.index = vols.index
+
+#         # print('Target Vol: ')
+#         # print(np.sqrt(np.dot(np.dot(wts.T, cov_matrix), wts)))
+
+#         # mvo_sr = sharpe_ratio(wts, expected_returns, cov_matrix, neg=False)
+        
+#         return wts
+#     return
 
 def portfolio_stop_loss(strategy_returns: pd.Series, stop_loss_target = -.01, t_costs = 0, re_entry_eod = True) -> pd.Series:
     """_summary_
@@ -260,12 +351,69 @@ def sortino_ratio(strategy_returns: pd.Series) -> float:
     
     return strategy_returns.mean() / strategy_returns[strategy_returns<=0].std() * 252 ** .5
 
+def drift_adjusted_sharpe_ratio(returns: pd.Series):
+    """ Computes Drift Adjusted Sharpe Ratio by leveraging Min-Max Normalization and OLS Linear Regression. 
+        This generates a more robust measure of risk-adjusted returns that account for potentially overfit 
+        strategies. The core idea is that large jumps/residuals (positvie or negative) from E[r] are significantly penalized.
+        Thus, the DASR rewards consistent returns (closer to best fit line), and penalizes returns series 
+        that are largely influenced by large outlier events (i.e., large positive jumps that almost never happen). 
+        Although this is a robust measure to capture the statistical signficance of returns, it may not be 
+        suitable for highly convex strategies that rely on large positive jumps to enhance 
+        their CAGR. 
+
+    Args:
+        returns (pd.Series): _description_
+
+    Returns:
+        _type_: _description_
+    """
+
+    # Get cumulative returns
+    returns = returns.dropna()
+    cum_rets = cumulative_returns(returns)
+    
+    # Apply min-max normalization to cumulative returns to ensure all returns are between 0-1
+    cum_rets = (cum_rets - cum_rets.min()) / (cum_rets.max() - cum_rets.min())
+        
+    # Get numerical values of time as exog variable
+    date_index = np.arange(cum_rets.index.size)
+    exog = sm.add_constant(date_index)  
+
+    # Build model
+    model = sm.OLS(cum_rets, exog)
+    regression = model.fit()
+
+    # Get regression params
+    alpha = regression.params[0]
+    beta = regression.params[1]
+
+    # Compute best fit line and format
+    reg_pred = date_index * beta + alpha
+    reg_pred = pd.Series(reg_pred, index=returns.index, name='Predicted Returns')
+
+    # Build Regression DataFrame
+    regression_df = pd.concat([cum_rets, reg_pred], axis=1)
+
+    # Get squared residuls and normalized squared residuals
+    regression_df['Squared Error'] = np.square(regression_df.iloc[:,0] - regression_df.iloc[:,1])   
+    # regression_df['Cubed Error'] = (regression_df.iloc[:,0] - regression_df.iloc[:,1])**3
+
+    # Get STD of Squared Residuals
+    std_squared_error = regression_df['Squared Error'].std()
+    # std_cubed_error = regression_df['Cubed Error'].std()
+    
+    # Get Drift Adjusted Sharpe Ratio
+    drift_adjusted_sharpe_ratio = (beta / std_squared_error) * np.sqrt(252)
+
+    return drift_adjusted_sharpe_ratio
+    
+
 def ulcer_index(strategy_returns: pd.Series) -> float:
     """ Measure of downside or drawdown volatility (similar to std equation). 
         This allows the manager to account for the severity and frequency of drawdowns.
         This formulaically penalizes compounding/repeated drawdowns, and rewards less frequent drawdowns.
 
-        Formula: Ulcer Index = SQRT(SUM(Drawdowns^2) / N) ~ SQRT(MSE of Drawdowns)
+        Formula: Ulcer Index = SQRT(SUM(Drawdowns^2) / N) ~ SQRT(MSE-esq metric of Drawdowns)
 
     Args:
         strategy_returns (pd.Series): time-series of strategy/portfolio returns.
@@ -278,7 +426,7 @@ def ulcer_index(strategy_returns: pd.Series) -> float:
     drawdowns = risk_analysis.get_drawdowns(strategy_returns)
 
     # Compute Ulcer Index based on aforementioned formula
-    ulcer_index = np.sqrt((drawdowns**2).mean())
+    ulcer_index = np.sqrt(((100*drawdowns)**2).mean())
 
     return ulcer_index
 
@@ -301,7 +449,7 @@ def martin_ratio(strategy_returns: pd.Series) -> float:
 
     return martin_ratio
 
-def omega_ratio(strategy_returns: pd.Series, required_return=0.07, required_return_annual = True, verbose = True) -> (pd.Series, float, float):
+def omega_ratio(strategy_returns: pd.Series, required_return=0.07, required_return_annual = True, verbose = True):
 
     """ Compute annualized Omega Ratio and Ultimate Omega Ratio for any strategy or security time-series of daily returns.
         This ratio captures tail-risk well by accounting for skew and kurtosis.
@@ -434,6 +582,22 @@ def get_risk_ratio(strategy_returns: pd.Series, verbose=False) -> float:
 
     return rr_ratio
 
+# Get statistical moments of a given series
+def get_statistical_moments(strategy_returns: pd.Series) -> list:
+    """_summary_
+
+    Args:
+        strategy_returns (pd.Series): _description_
+
+    Returns:
+        list: _description_
+    """
+
+    skew = stats.skew(strategy_returns)
+    kurtosis = stats.kurtosis(strategy_returns, fisher=False) 
+    
+    return [skew, kurtosis]
+
 def alpha_regression(strategy_returns: pd.Series, benchmark_returns: pd.Series) -> pd.Series:
     """ Using daily returns, regress strategy returns on benchmark returns to compute strategy/portfolio alpha.
 
@@ -507,13 +671,16 @@ def performance_summary(strategy_returns: pd.Series) -> pd.DataFrame:
     VaR, CVaR = risk_analysis.VaR(strategy_returns, use_laplace = True)
     
     performance_summary = pd.Series({'Sharpe Ratio' : sharpe_ratio(strategy_returns), 
+                                    'Drift Adjusted Sharpe Ratio' : drift_adjusted_sharpe_ratio(strategy_returns),
                                     'CAGR' : cagr(strategy_returns),
                                     'Vol' : vol(strategy_returns),
                                     'Sortino Ratio' : sortino_ratio(strategy_returns), 
                                     'Martin (Ulcer) Ratio' : martin_ratio(strategy_returns),
                                     'Omega Ratio' : omega_ratio(strategy_returns, verbose=False),
                                     'RR Ratio' : get_risk_ratio(strategy_returns), 
-                                    'Win Rate' : get_win_rate(strategy_returns),     
+                                    'Win Rate' : get_win_rate(strategy_returns),  
+                                    'Skew' : get_statistical_moments(strategy_returns)[0],
+                                    'Kurtosis' : get_statistical_moments(strategy_returns)[1],   
                                     'Max Drawdown' : risk_analysis.get_drawdowns(strategy_returns).min(),
                                     'VaR - Laplace' : VaR,
                                     'CVaR - Laplace' : CVaR                       
