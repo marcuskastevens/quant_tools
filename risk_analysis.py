@@ -1,4 +1,5 @@
 from scipy.stats import norm, kurtosis, skew, t
+import scipy.stats as stats
 import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
@@ -6,7 +7,7 @@ import numpy as np
 # ------------------------------------------------------------------------- Performance Metrics -------------------------------------------------------------------------
 
 # Compute N Largest Drawdowns
-def get_max_n_drawdowns(returns, N = 10, log_rets = False):
+def get_max_n_drawdowns(returns, N = 10, log_rets = False, plot = True):
     """ Generate series of drawdowns and plot max N drawdowns.
 
     Args:
@@ -72,9 +73,11 @@ def get_max_n_drawdowns(returns, N = 10, log_rets = False):
     get_n_max_drawdowns = drawdowns.nsmallest(N)
 
     # Plot N largest drawdowns
-    get_n_max_drawdowns.plot.bar()
+    if plot:
+        get_n_max_drawdowns.plot.bar()
     
     return get_n_max_drawdowns
+
 
 # Compute Time-Series of Drawdowns
 def get_drawdowns(returns, log_rets = False):
@@ -122,7 +125,7 @@ def get_drawdowns(returns, log_rets = False):
 # ------------------------------------------------------------------------- Simulations -------------------------------------------------------------------------
 
 # Var & CVar    
-def VaR(strategy_returns: pd.Series, alpha = .01, use_laplace = True) -> (float, float):
+def VaR(strategy_returns: pd.Series, alpha = .01, use_laplace = True):
     """ Compute daily Value at Risk & Conditional Value at Risk from strategy/portfolio returns.
 
         Formula: VaR = Fx^-1 (alpha, loc = mu, scale = sigma) or Inverse Norm CDF (alpha)  --> using inverse of normal cdf gives a closed form solution for a "alpha" probability.
@@ -140,7 +143,7 @@ def VaR(strategy_returns: pd.Series, alpha = .01, use_laplace = True) -> (float,
         
 
     Returns:
-        float, float: VaR, CVaR
+        (float, float): VaR, CVaR
     """
 
     # Compute inverse of normal distribution at prob (alpha) --> Z-Score
@@ -166,6 +169,267 @@ def VaR(strategy_returns: pd.Series, alpha = .01, use_laplace = True) -> (float,
 
     return VaR, CVaR
 
+# VaR & CVaR from Bootstrap Simulations
+def bootstrap_VaR(bootstrap_returns: pd.DataFrame, alpha=99):
+    """Compte Value at Risk & Conditional Value at Risk from series of synthetic/bootstrapped data.
+    Args:
+        bootstrap_returns (pd.DataFrame of np.array like): multiple synthetic time series.
+        alpha (float, optional): confidence level for VaR. Defaults to 0.99.
+
+    Returns:
+        (VaR, CVaR): Value at Risk, Conditional Value at Risk.
+    """
+    
+    # Clean returns
+    bootstrap_returns = bootstrap_returns.dropna()
+
+    # Value at Risk
+    VaR = np.percentile(bootstrap_returns, q=100-alpha)
+    
+    # Conditional Value at Risk (Expected Shortfall)
+    CVaR = np.mean(np.mean(bootstrap_returns[bootstrap_returns<VaR]))
+
+    return VaR, CVaR
+
+# Vol Limit & Conditional Vol Limit (EV of Vol)
+def vol_simulations(returns, target_vol = .10, lookback_period = 20, percentile = 99, N = 10000):
+    """ Simulates volatility conditions and determines what threshold of volatility is abnomral.
+
+    Args:
+        returns (pd.Series): Series of returns data.
+        target_vol (float, optional): Targeted annualized volatility used for scaling purposes. Defaults to .10.
+        lookback_period (int, optional): Lookback period to compute trailing volatility. Defaults to 20 or 1-month.
+        percentile (int, optional): Vol condifence level. Defaults to 5th percentile for 95% confidence.
+    """
+
+    # Compute vol scalar to ensure targeted vol
+    vol_scalar = target_vol / (returns.std()*252**.5)
+    scaled_returns = vol_scalar * returns
+
+    # Compute trailing "lookback_period" annualized vol
+    trailing_vol = (scaled_returns.rolling(lookback_period).std() * 252 **.5).dropna()
+
+    # Compute empirical conditional vol limit and vol limit at 99th percentile (EV of Vol > Vol Limit at 99th percentile)
+    empirical_vol_limit = np.percentile(trailing_vol, percentile)
+    empirical_CVol_limit = np.where(np.array(trailing_vol) > empirical_vol_limit, np.array(trailing_vol), np.nan) 
+    empirical_CVol_limit = empirical_CVol_limit[~np.isnan(empirical_CVol_limit)].mean()
+    
+    plt.hist(trailing_vol, 50)
+    plt.show()
+    
+    # Simulate 10,000 samples using normal distribution (could be changed in the future to a more heterskedastic, platykurtic distribution)
+    mu = trailing_vol.mean()
+    sigma = trailing_vol.std()
+    vol_sim = np.random.normal(mu, sigma, size=10000)
+    # Ensure vols are not negative, if so, just set as mean vol
+    vol_sim = np.where(vol_sim < 0, mu, vol_sim)
+
+    # Compute simulated conditional vol limit and vol limit at 99th percentile (EV of Vol > Vol Limit at 99th percentile)
+    sim_vol_limit = np.percentile(vol_sim, percentile)
+    sim_CVol_limit = np.where(vol_sim > sim_vol_limit, vol_sim, np.nan) 
+    sim_CVol_limit = sim_CVol_limit[~np.isnan(sim_CVol_limit)].mean()
+
+    plt.hist(pd.Series(vol_sim), 50)
+    plt.show()
+
+    return sim_vol_limit, sim_CVol_limit, empirical_vol_limit, empirical_CVol_limit
+
+# New Custom Bootstrap Method (BEST)
+def asymmetric_wild_bootstrap(returns: pd.Series, n_samples=10000):
+    """ Generate synthetic time series by adding asymmetric (skewed) noise to original time series. This differs from
+        the original implementation of Wild Bootstrap in that instead of using (1, -1) or a standard distribution to
+        generate noise, it is produced by rescaling returns according to their skew, normalizing these returns which 
+        enables the noise to have a mean = 0, stdev = 1, and be rescaled according to randomly sampled returns which mimicks 
+        the original implementation's noise component.
+
+        In the original construction of Wild Bootstraps, skew was not sufficiently captured. With the Asymmetric Wild Bootstrap, 
+        skew is directly considered in the computation of noise, more efficiently capture the dynamics of financial time series 
+        and posterior distribution.
+
+    Args:
+        returns (pd.Series): time series of returns.
+        n_samples (int, optional): number of synthetic time series generated. Defaults to 10000.
+    """
+    
+    # Compute size of returns series
+    n = len(returns)
+           
+    # Initialize bootstrap samples matrix
+    asymmetric_wild_bootsrapped_samples = np.empty((n_samples, n))
+
+    # Nonparametric skew
+    skew = (returns.mean() - returns.median())/returns.std() 
+    # skew = stats.skew(returns) / 2
+
+    # Generate n_samples of length n
+    for i in range(0, n_samples):
+
+        # Scale returns series according to its skew
+        if skew > 0: 
+            neg_samples = np.abs(returns)*-1
+            pos_samples = np.abs(returns)*(1+skew)
+        else:
+            neg_samples = np.abs(returns)*-1*(1-skew)
+            pos_samples = np.abs(returns)*1
+
+        asymmetric_returns = np.array([neg_samples, pos_samples]).reshape(neg_samples.shape[0]*2) 
+
+        # Bootstrap asymmetrically scaled returns and normalize via Z-Score
+        wild_noise = np.random.choice(asymmetric_returns, size=n, replace=True)
+        wild_noise = (wild_noise - wild_noise.mean()) / wild_noise.std()
+
+        # Scale noise with absolute value of newly bootstrapped skewed returns
+        wild_noise = np.abs(np.random.choice(asymmetric_returns, size=n, replace=True)) * wild_noise
+
+        # Add noise to original returns
+        asymmetric_wild_bootsrapped_samples[i] = (returns + wild_noise).values
+
+    return pd.DataFrame(asymmetric_wild_bootsrapped_samples, columns=returns.index).T
+    
+
+# Bootstrap Method for Heteroskedasticity 
+def wild_bootstrap_original(returns: pd.Series, n_samples=10000, normal=True):
+    """
+    Perform Wild Bootstrap on a 1D array of financial time series data. 
+    
+    The Wild Bootstrap method is a modification of the classic Bootstrap method that is used to address the issue of 
+    heteroscedasticity (i.e., non-constant variance) and volatility clustering in financial time series data. 
+    
+    The wild bootstrap method involves generating new samples by resampling from the original data and
+    multiplying each observation by a random noise value drawn from a standard probability distribution (e.g., Gaussian, Student’s T, Laplace). 
+    
+    This distribution is chosen to reflect the estimated variance of the original data. The Wild Bootstrap method can improve the 
+    accuracy of statistical moment estimation and confidence intervals when dealing with heteroscedastic financial time series.
+
+    Args:
+    returns (numpy.ndarray or pd.Series): A 1D array of data.
+    n_samples (int): The number of resamples to generate.
+    normal (bool): Determines the probability distribution of the noise element (Gaussian or Laplace).
+
+    For more information on Laplace Distribution: https://www.statisticshowto.com/laplace-distribution-double-exponential/
+    For more information on Wild Bootstrap Method: https://stats.stackexchange.com/questions/408651/intuitively-how-does-the-wild-bootstrap-work
+    
+    Returns:
+    pd.DataFrame: An matrix of bootstrapped returns.
+    """
+
+    # Compute size of returns series
+    n = len(returns)
+
+    # Initialize bootstrap samples matrix
+    wild_bootsrapped_samples = np.empty((n_samples, n))    
+
+    # Generate n_samples of length n
+    for i in range(0, n_samples):
+        
+        # ------------------------------------------- Generate Noise -------------------------------------------
+        if normal:
+            # Generate random perturbations from a standardized distribution (e.g., Standard Normal)
+            perturbations = np.random.standard_normal(n)
+
+        else: 
+            laplace_mu = 0
+            laplace_beta =  np.sqrt(np.var(returns)/2)
+            # perturbations = np.random.laplace(loc=laplace_mu, scale=laplace_beta, size=n)
+            perturbations = np.random.laplace(loc=laplace_mu, scale=1, size=n)
+
+        # ------------------------------------------- Scale Noise -------------------------------------------
+        # Randomly sample returns (shuffle) from empirical distribution and scale by Gaussian perturbations
+        
+        # Scale noise element by bootstrapped returns
+        wild_noise = np.random.choice(returns, size=n, replace=True) * perturbations
+        
+        # ------------------------------------------- Generate Samples -------------------------------------------
+        # Add the wild noise to the original data
+        wild_bootsrapped_samples[i] = (returns + wild_noise).values     
+        
+    return pd.DataFrame(wild_bootsrapped_samples, columns=returns.index).T
+
+# Bootstrap Summarizer
+def bootstrap_summary(synthetic_data: pd.DataFrame, empirical_data: pd.Series):
+    """ Function to directly compare a matrix of bootstrapped time series and its underlying historical/empirical data.
+        Relevant features include computing statistical moments of estimations, statistical significance statistics, etc.
+        
+    Args:
+        synthetic_data (pd.DataFrame): _description_
+        empirical_data (pd.Series): _description_
+
+    Returns:
+        _type_: _description_
+    """
+    # Change desired formatting
+    pd.options.display.float_format = '{:.4f}'.format
+
+    # Declare temp hash tables to store relevant statistics
+    bootstrap_summary_data = {}
+    empirical_summary_data = {}
+            
+    # Mean
+    mean = np.mean(np.mean(synthetic_data))
+    bootstrap_summary_data['Mean'] = mean
+    empirical_summary_data['Mean'] = np.mean(empirical_data)
+
+    # Standard Deviation
+    mean_std = np.mean(np.std(synthetic_data))
+    bootstrap_summary_data['STD'] = mean_std
+    empirical_summary_data['STD'] = np.std(empirical_data)
+
+    # Mean Skew
+    mean_skew = np.mean(stats.skew(synthetic_data))
+    bootstrap_summary_data['Skew'] = mean_skew
+    empirical_summary_data['Skew'] = stats.skew(empirical_data)
+
+    # Mean Kurtosis
+    mean_kurtosis = np.mean(stats.kurtosis(synthetic_data, fisher=False))
+    bootstrap_summary_data['Kurtosis'] = mean_kurtosis
+    empirical_summary_data['Kurtosis'] = stats.kurtosis(empirical_data, fisher=False)
+
+    # Mean 5'th Moment (Asymmetry of Tails)
+    mean_5th_moment = np.mean(stats.moment(synthetic_data, moment=5))
+    bootstrap_summary_data['5th Moment'] = mean_5th_moment
+    empirical_summary_data['5th Moment'] = stats.moment(empirical_data, moment=5)
+
+    # Standard Deviation of Mean
+    std_mean = np.std(np.mean(synthetic_data))
+    bootstrap_summary_data['STD of Mean'] = std_mean
+
+    # Standard Deviation of Median
+    std_median = np.std((synthetic_data).median())
+    bootstrap_summary_data['STD of Median'] = std_median
+
+    # Mean Squared Error
+    mse = ((synthetic_data.mean() - empirical_data.mean())**2).mean()
+    bootstrap_summary_data['MSE'] = mse
+
+    # R^2 = Average R^2 Across All Samples
+    r_2 = []
+
+    for i, data in synthetic_data.items():
+        tmp_r_2 = 1 - np.sum((data - empirical_data)**2) / np.sum((empirical_data - empirical_data.mean())**2)
+        r_2.append(tmp_r_2)
+
+    bootstrap_summary_data['R^2'] = np.mean(r_2)
+
+    # P-Value
+    synth_cum_rets = (np.exp(np.log(synthetic_data+1).cumsum().iloc[:, 0:1000])-1).iloc[-1,:] # use log returns for faster computations
+    empirical_cum_rets = ((1+empirical_data).cumprod()-1).iloc[-1]
+    p_value = len(synth_cum_rets[synth_cum_rets>empirical_cum_rets]) / len(synth_cum_rets)
+    empirical_summary_data['P-Value'] = p_value
+
+
+    # Summarize Data
+    bootstrap_summary_data = pd.Series(bootstrap_summary_data, name='Bootstrap Summary Statistics')
+    empirical_summary_data = pd.Series(empirical_summary_data, name='Historical Summary Statistics')
+
+    summary_data = pd.concat([bootstrap_summary_data, empirical_summary_data], axis=1)
+    
+    return summary_data
+
+
+
+
+
+# ------------------------------------------------------------------------- Dead Code -------------------------------------------------------------------------
 
 # def value_at_risk(returns, percentile = 5):
 #     """ Compute Value at Risk & Conditional Value at Risk from strategy/portfolio returns
@@ -259,47 +523,3 @@ def VaR(strategy_returns: pd.Series, alpha = .01, use_laplace = True) -> (float,
 
 #     return norm_Var, norm_CVar, full_sample_Var, full_sample_CVar # mu, sigma, strat_kurtosis, df, mc_norm,
     
-
-# ----------------------------- FIX THIS TO USE CLOSED FORM NORM INV VAR ------------------------------
-# Vol limit & conditional vol limit (EV of Vol)
-def vol_simulations(returns, target_vol = .10, lookback_period = 20, percentile = 99, N = 10000):
-    """ Simulates volatility conditions and determines what threshold of volatility is abnomral.
-
-    Args:
-        returns (pd.Series): Series of returns data.
-        target_vol (float, optional): Targeted annualized volatility used for scaling purposes. Defaults to .10.
-        lookback_period (int, optional): Lookback period to compute trailing volatility. Defaults to 20 or 1-month.
-        percentile (int, optional): Vol condifence level. Defaults to 5th percentile for 95% confidence.
-    """
-
-    # Compute vol scalar to ensure targeted vol
-    vol_scalar = target_vol / (returns.std()*252**.5)
-    scaled_returns = vol_scalar * returns
-
-    # Compute trailing "lookback_period" annualized vol
-    trailing_vol = (scaled_returns.rolling(lookback_period).std() * 252 **.5).dropna()
-
-    # Compute empirical conditional vol limit and vol limit at 99th percentile (EV of Vol > Vol Limit at 99th percentile)
-    empirical_vol_limit = np.percentile(trailing_vol, percentile)
-    empirical_CVol_limit = np.where(np.array(trailing_vol) > empirical_vol_limit, np.array(trailing_vol), np.nan) 
-    empirical_CVol_limit = empirical_CVol_limit[~np.isnan(empirical_CVol_limit)].mean()
-    
-    plt.hist(trailing_vol, 50)
-    plt.show()
-    
-    # Simulate 10,000 samples using normal distribution (could be changed in the future to a more heterskedastic, platykurtic distribution)
-    mu = trailing_vol.mean()
-    sigma = trailing_vol.std()
-    vol_sim = np.random.normal(mu, sigma, size=10000)
-    # Ensure vols are not negative, if so, just set as mean vol
-    vol_sim = np.where(vol_sim < 0, mu, vol_sim)
-
-    # Compute simulated conditional vol limit and vol limit at 99th percentile (EV of Vol > Vol Limit at 99th percentile)
-    sim_vol_limit = np.percentile(vol_sim, percentile)
-    sim_CVol_limit = np.where(vol_sim > sim_vol_limit, vol_sim, np.nan) 
-    sim_CVol_limit = sim_CVol_limit[~np.isnan(sim_CVol_limit)].mean()
-
-    plt.hist(pd.Series(vol_sim), 50)
-    plt.show()
-
-    return sim_vol_limit, sim_CVol_limit, empirical_vol_limit, empirical_CVol_limit
