@@ -1,4 +1,5 @@
 from scipy.stats import norm, kurtosis, skew, t
+import backtest_tools.portfolio_tools as pt
 import scipy.stats as stats
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -235,8 +236,10 @@ def vol_simulations(returns, target_vol = .10, lookback_period = 20, percentile 
     return sim_vol_limit, sim_CVol_limit, empirical_vol_limit, empirical_CVol_limit
 
 # New Custom Bootstrap Method (BEST)
-def asymmetric_wild_bootstrap(returns: pd.Series, n_samples=10000):
-    """ Generate synthetic time series by adding asymmetric (skewed) noise to original time series. This differs from
+def asymmetric_bootstrap(returns: pd.Series, n_samples=10000):
+    """ STILL IN RESEARCH PROCESS: default to Wild Bootstrap when executing strategy robustness tests.
+    
+        Generate synthetic time series by adding asymmetric (skewed) noise to original time series. This differs from
         the original implementation of Wild Bootstrap in that instead of using (1, -1) or a standard distribution to
         generate noise, it is produced by rescaling returns according to their skew, normalizing these returns which 
         enables the noise to have a mean = 0, stdev = 1, and be rescaled according to randomly sampled returns which mimicks 
@@ -250,6 +253,8 @@ def asymmetric_wild_bootstrap(returns: pd.Series, n_samples=10000):
         returns (pd.Series): time series of returns.
         n_samples (int, optional): number of synthetic time series generated. Defaults to 10000.
     """
+
+    returns.dropna(inplace=True)
     
     # Compute size of returns series
     n = len(returns)
@@ -258,8 +263,8 @@ def asymmetric_wild_bootstrap(returns: pd.Series, n_samples=10000):
     asymmetric_wild_bootsrapped_samples = np.empty((n_samples, n))
 
     # Nonparametric skew
-    skew = (returns.mean() - returns.median())/returns.std() 
-    # skew = stats.skew(returns) / 2
+    # skew = (returns.mean() - returns.median())/returns.std() 
+    skew = stats.skew(returns) / 2
 
     # Generate n_samples of length n
     for i in range(0, n_samples):
@@ -312,6 +317,8 @@ def wild_bootstrap_original(returns: pd.Series, n_samples=10000, normal=True):
     Returns:
     pd.DataFrame: An matrix of bootstrapped returns.
     """
+
+    returns.dropna(inplace=True)
 
     # Compute size of returns series
     n = len(returns)
@@ -389,6 +396,21 @@ def bootstrap_summary(synthetic_data: pd.DataFrame, empirical_data: pd.Series):
     bootstrap_summary_data['5th Moment'] = mean_5th_moment
     empirical_summary_data['5th Moment'] = stats.moment(empirical_data, moment=5)
 
+    # Value at Risk
+    bootstrap_summary_data['VaR - 99% CI'], bootstrap_summary_data['CVaR - 99% CI'] = bootstrap_VaR(synthetic_data)
+
+    # P-Value
+    synth_cum_rets = (np.exp(np.log(synthetic_data+1).cumsum().iloc[:, 0:1000])-1).iloc[-1,:] # use log returns for faster computations
+    empirical_cum_rets = ((1+empirical_data).cumprod()-1).iloc[-1]
+    p_value = len(synth_cum_rets[synth_cum_rets>empirical_cum_rets]) / len(synth_cum_rets)
+    empirical_summary_data['P-Value'] = p_value
+
+    # Expected Value of Cumulative Returns
+    bootstrap_summary_data['EV of Cumulative Returns'] = synth_cum_rets.mean()
+
+    # % of Negative of Cumulative Returns
+    bootstrap_summary_data['Pct. of Negative Cumulative Returns'] = len(synth_cum_rets.where(synth_cum_rets<0).dropna()) / len(synth_cum_rets)
+
     # Standard Deviation of Mean
     std_mean = np.std(np.mean(synthetic_data))
     bootstrap_summary_data['STD of Mean'] = std_mean
@@ -410,13 +432,6 @@ def bootstrap_summary(synthetic_data: pd.DataFrame, empirical_data: pd.Series):
 
     bootstrap_summary_data['R^2'] = np.mean(r_2)
 
-    # P-Value
-    synth_cum_rets = (np.exp(np.log(synthetic_data+1).cumsum().iloc[:, 0:1000])-1).iloc[-1,:] # use log returns for faster computations
-    empirical_cum_rets = ((1+empirical_data).cumprod()-1).iloc[-1]
-    p_value = len(synth_cum_rets[synth_cum_rets>empirical_cum_rets]) / len(synth_cum_rets)
-    empirical_summary_data['P-Value'] = p_value
-
-
     # Summarize Data
     bootstrap_summary_data = pd.Series(bootstrap_summary_data, name='Bootstrap Summary Statistics')
     empirical_summary_data = pd.Series(empirical_summary_data, name='Historical Summary Statistics')
@@ -426,7 +441,41 @@ def bootstrap_summary(synthetic_data: pd.DataFrame, empirical_data: pd.Series):
     return summary_data
 
 
+def robustness_test(returns: pd.Series):
+    """ Function to conduct stress-tests on a backtest's time series. This includes:
 
+        1) Bootstrap Monte Carlo Simulation of Returns (Leveraging Asymmetric/Wild Bootstrap which better 
+           capture the dynamics of financial time series).
+
+        2) Comparative Analysis on MC vs. Empirical Data.
+
+        3) Summary Statistics: P-Value, Mean, STD, Skew, Kurtosis, 5th Moment, 
+           STD of MC Mean, STD of MC Median, MSE, R^2, VaR, EV of Cum Rets, & % Negative Cumulative Returns.
+
+        4) Plot of Cumulative Simulated Returns.
+
+    Args:
+        returns: None
+    """
+
+    # Leverage Asymmetric Wild Bootstrap Algorithm
+    # asymmetric_bootstrap_returns = asymmetric_bootstrap(returns, n_samples=10000)
+    # print(bootstrap_summary(synthetic_data=asymmetric_bootstrap, empirical_data=returns))
+
+    # # Compute MC Simulation Cumulative Returns
+    # asymmetric_bootstrap_cum_rets = (np.exp(1+cumulative_returns(np.log(1+asymmetric_bootstrap_returns.iloc[:, 0:1000]), log_rets=True))-1)
+    # asymmetric_bootstrap_cum_rets.plot(title=f'{returns.name} - Asymmetric Boostrap Returns', legend=False)
+    # plt.show()
+
+    # Leverage Original Wild Bootstrap Algorithm
+    wild_bootstrap_returns = wild_bootstrap_original(returns, n_samples=10000)
+
+    # Compute MC Simulation Cumulative Returns
+    wild_bootstrap_cum_rets = (np.exp(1+pt.cumulative_returns(np.log(1+wild_bootstrap_returns.iloc[:, 0:1000]), log_rets=True))-1)
+    wild_bootstrap_cum_rets.plot(title=f'{returns.name} - Wild Boostrap Monte Carlo Returns', legend=False)
+    plt.show()
+
+    return bootstrap_summary(synthetic_data=wild_bootstrap_returns, empirical_data=returns)
 
 
 # ------------------------------------------------------------------------- Dead Code -------------------------------------------------------------------------
