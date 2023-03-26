@@ -417,7 +417,7 @@ def ulcer_index(strategy_returns: pd.Series) -> float:
     drawdowns = risk_analysis.get_drawdowns(strategy_returns)
 
     # Compute Ulcer Index based on aforementioned formula
-    ulcer_index = np.sqrt(((100*drawdowns)**2).mean())
+    ulcer_index = np.sqrt(((drawdowns)**2).mean())
 
     return ulcer_index
 
@@ -436,7 +436,7 @@ def martin_ratio(strategy_returns: pd.Series) -> float:
     """
 
     # Get Ulcer Index of strategy/portfolio returns and compute Martin Ratio based on aforementioned formula
-    martin_ratio = strategy_returns.mean() / ulcer_index(strategy_returns) * 252 **.5
+    martin_ratio = strategy_returns.mean() / ulcer_index(strategy_returns) * 252
 
     return martin_ratio
 

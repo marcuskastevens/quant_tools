@@ -147,7 +147,7 @@ def VaR(strategy_returns: pd.Series, alpha = .01, use_laplace = True):
         (float, float): VaR, CVaR
     """
 
-    # Compute inverse of normal distribution at prob (alpha) --> Z-Score
+    # Leverage parametric quantile function to get the inverse cdf of the standard normal distribution at prob (alpha) --> Z-Score
     z_score = norm.ppf(alpha)
     mu = strategy_returns.mean()
     sigma = strategy_returns.std()
@@ -161,7 +161,7 @@ def VaR(strategy_returns: pd.Series, alpha = .01, use_laplace = True):
         CVaR = simulated_returns[simulated_returns < VaR].mean()
 
         return VaR, CVaR
-
+    
     # VaR = worst daily return given a particular probability (alpha) given a distribution of returns
     VaR = z_score * sigma + mu  # Alternatively, norm.ppf(alpha, loc = mu, scale = sigma) to avoid z-score normalization and generate it more quickly
     
