@@ -35,7 +35,7 @@ def portfolio_sharpe_ratio(asset_weights, expected_returns, cov_matrix, neg = Tr
     
     return sharpe_ratio
 
-def mvo(hist_returns: pd.DataFrame, expected_returns: pd.DataFrame, long_only = False, vol_target = .01, vol_target_boolean=True, max_position_weight = .2, net_exposure = 1, market_bias = 0, constrained=True, verbose=True):
+def mvo(hist_returns: pd.DataFrame, expected_returns: pd.DataFrame, long_only = False, vol_target = .01, max_position_weight = .2, net_exposure = 1, market_bias = 0, constrained=True, verbose=True):
     """ Constrained or unconstrained Mean Variance Optimization. This leverages convex optimization to identify local minima which serve to minimize an objective function.
         In the context of portfolio optimization, our objective function is the negative portfolio SR. 
 
@@ -49,8 +49,7 @@ def mvo(hist_returns: pd.DataFrame, expected_returns: pd.DataFrame, long_only = 
     """
 
     # ------------------------------------------------------------- ADD LONG ONLY CONSTRAINT -------------------------------------------------------------
-    if long_only: 
-        print('Long Only Functionality Not Yet Implemented')
+
 
     # Match tickers across expected returns and historical returns
     expected_returns.dropna(inplace=True)
@@ -64,9 +63,12 @@ def mvo(hist_returns: pd.DataFrame, expected_returns: pd.DataFrame, long_only = 
         
         # Initial guess is naive 1/n portfolio
         initial_guess = np.array([1 / n] * n)
-        
-        # Set max allocation per security
-        bounds = Bounds(-max_position_weight, max_position_weight)
+
+        if long_only: 
+            bounds = Bounds(0, max_position_weight)
+        else:
+            # Set max allocation per security
+            bounds = Bounds(-max_position_weight, max_position_weight)
 
         if constrained:
 
@@ -95,7 +97,7 @@ def mvo(hist_returns: pd.DataFrame, expected_returns: pd.DataFrame, long_only = 
                     constraints=constraints)['x']
                     )
             
-        elif vol_target_boolean:
+        elif vol_target is not None:
             
             constraints =  [# Target volatility
                             {"type": "eq", "fun": lambda vols: np.sqrt(np.dot(np.dot(vols.T, cov_matrix), vols)) - vol_target},
@@ -173,6 +175,127 @@ def unconstrained_mvo(hist_returns: pd.DataFrame, expected_returns: pd.Series):
     print(f'Target Portfolio Sharpe Ratio: {mvo_sr}')   
     
     return mvo_weights
+
+def portfolio_dasr(w: pd.Series, returns: pd.DataFrame, neg = True) ->  float:
+    """ Computes DASR of weighted portfolio.
+
+    Args:
+        betas (pd.Series): daily expected returns from normalized linear regression.
+        squared_residuals (pd.DataFrame): squared error from OLS regression.
+        w (pd.Series): portfolio weights.
+
+    Returns:
+        float: _description_
+    """
+
+    # Get weighted returns
+    returns = (returns * w).sum(1)
+    # Get weighted portfolio DASR
+    portfolio_dasr = drift_adjusted_sharpe_ratio(returns.dropna())
+
+    if neg:
+        # Return negative DASR for portfolio optimization
+        return (-portfolio_dasr)
+    
+    # Return real DASR for performance analysis purposes
+    return portfolio_dasr
+
+def dpo_optimization(returns: pd.DataFrame, long_only=False, constrained=True, max_position_weight=1, vol_target=None) -> pd.Series:
+    """ Executes constrained convex portfolio optimization to generate optimal
+        DASR asset weights.
+
+    Args:
+        returns (pd.DataFrame): _description_
+        long_only (bool, optional): _description_. Defaults to False.
+        constrained (bool, optional): _description_. Defaults to True.
+        max_position_weight (int, optional): _description_. Defaults to 1.
+        vol_target (_type_, optional): _description_. Defaults to None.
+
+    Returns:
+        pd.Series: _description_
+    """
+
+    n = len(returns.columns)
+
+    # Initial guess is naive 1/n portfolio
+    w = np.array([1 / n] * n)
+
+    # Declare constraints list
+    constraints =  []
+
+    # Set constraints (e.g., leverage, vol target, max sizing)
+    if constrained:
+
+        # Max position size
+        if long_only:
+            # Long only constraint
+            bounds = Bounds(0, max_position_weight)
+        else:
+            # L/S constraint
+            bounds = Bounds(-max_position_weight, max_position_weight)
+
+        # constraints =  [# Weights Constraint
+        #         {"type": "eq", "fun": lambda w: np.sum(np.abs(w)) - 1},
+        #         # {"type": "eq", "fun": lambda w: np.sum(w) - 0},
+        #         ]
+        # No Leverage Constraint
+        constraints.append({"type": "eq", "fun": lambda w: np.sum(np.abs(w)) - 1})
+
+        # Volatility Targeting
+        if vol_target is not None:           
+            constraints.append({"type": "eq", "fun": lambda w: np.sqrt(np.dot(np.dot(w.T, returns.cov()), w)) - vol_target})
+    else:
+        # Is not implementable nor optimal
+        bounds = Bounds(-100, 100)
+
+        constraints =  []
+    
+    # Get optimized weights
+    w = pd.Series(opt(portfolio_dasr, 
+                            w,
+                            args=(returns), 
+                            method='SLSQP',
+                            bounds = bounds,
+                            constraints=constraints)['x'],
+                index=returns.columns
+                )
+    
+    return w
+
+def multistrategy_portfolio_optimization(multistrategy_portfolio: pd.DataFrame, rebal_freq: int, lookback_window: int, optimization = ['MVO', 'DPO'], vol_target=None, max_position_weight=.2, constrained=True):
+    """ Executes multistrategy portfolio optimization by leveraging either one of two different optimization algorithms: 
+        - MVO
+        - Drift Adjusted Portfolio Optimization
+
+    Args:
+        multistrategy_portfolio (pd.DataFrame): strategy returns.
+        rebal_freq (int):
+        lookback_window (int): 
+        optimiztion (list, optional): type of optimization. Defaults to ['MVO', 'DPO'].
+        vol_target (float, optional): Defaults to .01.
+        max_position_weight (float, optional): Defaults to .5.
+        constrained (boolean, optiona;): 
+    """
+
+    w = {}
+
+    if optimization == 'MVO':
+        for date in multistrategy_portfolio.index[::rebal_freq]:
+        
+            w[date] = mvo(hist_returns=multistrategy_portfolio.loc[:date], expected_returns=multistrategy_portfolio.loc[:date].tail(lookback_window).mean(), vol_target=vol_target, max_position_weight=max_position_weight, constrained=constrained, verbose=False, long_only=True)
+    
+    elif optimization == 'DPO':
+        for date in multistrategy_portfolio.index[::rebal_freq]:
+            w[date] = dpo_optimization(returns=multistrategy_portfolio.loc[:date].tail(lookback_window), long_only=True, constrained=constrained, max_position_weight=max_position_weight, vol_target=vol_target)
+
+    # Convert Hash Table to DataFrame
+    indices_df = pd.DataFrame(index=multistrategy_portfolio.index)
+    w = pd.concat([indices_df, pd.DataFrame(w).T], axis=1).ffill().dropna()
+
+    # Get strategy returns
+    multistrategy_portfolio_optimized_returns = (multistrategy_portfolio*w.shift(2)).sum(1).dropna()
+
+    return multistrategy_portfolio_optimized_returns, w
 
 def portfolio_stop_loss(strategy_returns: pd.Series, stop_loss_target = -.01, t_costs = 0, re_entry_eod = True) -> pd.Series:
     """_summary_
@@ -275,6 +398,50 @@ def get_daily_stop_loss_returns(intraday_asset_returns: pd.DataFrame, mvo_wts: p
     return daily_strategy_returns_stop_loss 
 
 
+def rebal_timing_luck_multistrategy_test(multistrategy_portfolio: pd.DataFrame, rebal_freq: int, lookback_window: int, optimization = 'DPO', increment=3):
+    """ Conduct rebalancing timing luck robustness tests. Increment rebalancing day by "increment" for each optimization. This generates ample sample size across different rebal
+        times of the month. 
+
+    Args:
+        multistrategy_portfolio (pd.DataFrame): _description_
+        rebal_freq (int): _description_
+        lookback_window (int): _description_
+        optimization (str, optional): _description_. Defaults to 'DPO'.
+        increment (int, optional): _description_. Defaults to 3.
+
+    Returns:
+        (pd.DataFrame, pd.DataFrame): (rebal-day agnositc multistrategy returns, average multistrategy performance summary)
+    """
+    
+    multistrategy_returns = {}
+    multistrategy_weights = {}
+
+    # Run optimizations with varying rebal days
+    if optimization == 'DPO':
+    
+        for i in np.arange(20)[::increment]:
+            multistrategy_returns[f'{i} Day Shift'], multistrategy_weights[f'{i} Day Shift'] = multistrategy_portfolio_optimization(multistrategy_portfolio=multistrategy_portfolio.shift(i), rebal_freq=rebal_freq, lookback_window=lookback_window, optimization = optimization, max_position_weight=1)
+
+    elif optimization == 'MVO':
+        
+        for i in np.arange(20)[::increment]:
+            multistrategy_returns[f'{i} Day Shift'], multistrategy_weights[f'{i} Day Shift'] = multistrategy_portfolio_optimization(multistrategy_portfolio=multistrategy_portfolio.shift(i), rebal_freq=rebal_freq, lookback_window=lookback_window, optimization = optimization, vol_target=.01, max_position_weight=1)
+    
+    # Transform hash table to pd.DataFrame
+    multistrategy_returns = pd.DataFrame(multistrategy_returns)
+
+    # Compute average multistrategy performance across all rebal days
+    timing_luck_performance_summary = pd.DataFrame()
+
+    for i, rets in multistrategy_returns.items():
+
+        timing_luck_performance_summary = pd.concat([performance_summary(rets), timing_luck_performance_summary], axis=1)
+
+    # Average performance metrics
+    timing_luck_performance_summary.mean(axis=1)
+
+    return multistrategy_returns, timing_luck_performance_summary
+
 # ------------------------------------------------------------------------- Performance Metrics -------------------------------------------------------------------------
 
 # Get Compound Annual Growth Rate from daily returns
@@ -361,6 +528,7 @@ def drift_adjusted_sharpe_ratio(returns: pd.Series):
 
     # Get cumulative returns
     returns = returns.dropna()
+    n = len(returns)
     cum_rets = cumulative_returns(returns)
     
     # Apply min-max normalization to cumulative returns to ensure all returns are between 0-1
@@ -387,14 +555,13 @@ def drift_adjusted_sharpe_ratio(returns: pd.Series):
 
     # Get squared residuls and normalized squared residuals
     regression_df['Squared Error'] = np.square(regression_df.iloc[:,0] - regression_df.iloc[:,1])   
-    # regression_df['Cubed Error'] = (regression_df.iloc[:,0] - regression_df.iloc[:,1])**3
 
     # Get Mean of Squared Residuals
     mse = regression_df['Squared Error'].mean()
-    # mce = regression_df['Cubed Error'].mean()
+    standardized_mse = mse * np.sqrt(n)
     
     # Get Drift Adjusted Sharpe Ratio
-    drift_adjusted_sharpe_ratio = (beta / mse) * 252
+    drift_adjusted_sharpe_ratio = (beta / standardized_mse) * 252
 
     return drift_adjusted_sharpe_ratio
     
@@ -674,10 +841,11 @@ def performance_summary(strategy_returns: pd.Series) -> pd.DataFrame:
                                     'Kurtosis' : get_statistical_moments(strategy_returns)[1],   
                                     'Max Drawdown' : risk_analysis.get_drawdowns(strategy_returns).min(),
                                     'VaR - Laplace' : VaR,
-                                    'CVaR - Laplace' : CVaR                       
-                                    })
+                                    'CVaR - Laplace' : CVaR, 
+                                    'Tail-Risk Density' : len(strategy_returns.where(strategy_returns<VaR).dropna()) / len(strategy_returns)                   
+                                    }, name='Performance Summary')
 
-    return performance_summary
+    return pd.DataFrame(performance_summary).round(3)
 
 # ------------------------------------------------------------------------- Data Conversions -------------------------------------------------------------------------
 
