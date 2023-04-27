@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+from pandas_ta.overlap import ma
 
 def drop_outlier_returns(returns: pd.DataFrame, daily_ret_threshold=20) -> pd.DataFrame:
     """ Drops securities that have abnormal returns. This is a data cleansing excercise that controls for potential data errors or 
@@ -50,3 +51,36 @@ def volatility_filter(returns: pd.DataFrame, p=0.50, filter_type='high_vol') -> 
     print(f'Dropped tickers: {tickers}')
 
     return returns.drop(columns=tickers)
+
+def true_range(prices):
+    """Function to get the var_atr & cov_atr which allows traders to leverage atr in a similar manner to variance & covariance.
+
+    Args:
+        prices (_type_): _description_
+    """
+
+    high = prices.High
+    low = prices.Low
+    close = prices["Adj Close"]
+
+    ranges = [high - low, high - close.shift(1), close.shift(1) - low]
+    true_range = pd.concat(ranges, axis=1)
+    true_range = true_range.abs().max(axis=1)
+    
+    return true_range
+
+def true_range_covariance(true_ranges: pd.DataFrame, lookback_window=20):
+    """Function to get the var_atr & cov_atr which allows traders to leverage atr in a similar manner to variance & covariance.
+
+    Args:
+        true_ranges (pd.DataFrame): _description_
+        lookback_window (int, optional): _description_. Defaults to 20.
+
+    Returns:
+        _type_: _description_
+    """   
+    sample_true_ranges = true_ranges.tail(lookback_window)
+    n = lookback_window
+    cov_true_range = sample_true_ranges.T.dot(sample_true_ranges) / (n-1)
+    
+    return cov_true_range

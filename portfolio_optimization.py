@@ -4,7 +4,7 @@ Library for portfolio optimization.
 '''
 
 from scipy.optimize import minimize as opt
-from backtest_tools import risk_analysis as ra, portfolio_tools as pt
+from backtest_tools import risk_analysis as ra, portfolio_tools as pt, data_preprocessing as dp
 from scipy.optimize import Bounds
 import statsmodels.api as sm
 from scipy import stats
@@ -89,6 +89,94 @@ def risk_parity_obj(w: pd.Series, cov: pd.DataFrame) -> float:
 
     # Measure the absolute difference between current vs. equal risk contribution
     diff = np.abs((risk_contribution - equal_risk_contribution)).sum()
+
+    return diff 
+
+def dollar_risk_parity_obj(n_units: pd.Series, cov: pd.DataFrame) -> float:
+    """ Inspired by CTA and Trend Follwers' risk management practices, the Dollar Risk Parity objective function
+        targets "target_risk" percent risk per position (equal risk contribution) which represents 1 SDs of the 
+        underlying instrument's price movement. Here, the covariance and variance of each asset defines its risk to account for
+        correlation structures and mitiage over exposure to a single risk factor.
+               
+        Positions represent how many shares to purchase for an 1 SD move in the underlying instrument 
+        to represent "target_risk" percent loss in "portfolio_value". This follows the risk management practices of 
+        select portfolio managers that target equal risk allocation to each trade/position, but leverages stop-losses 
+        (e.g., 1SD stop) to limit exogenous risk exposure.
+
+        This follows the intuition behind traditional equal variance contribution risk parity algorithms, but defines risk as dollar value
+        at risk (e.g., stop loss set at 1SD) instead of purely variance.          
+
+    Args:
+        n_units (pd.Series): number of units (e.g., shares, contracts) to purchase per portfolio constituent. 
+        cov (pd.DataFrame): covariance matrix of portfolio constituents' prices.
+        target_risk (float): target percent risk per position.
+        portfoio_value (float): portfolio dollar value.
+
+    Returns:
+        float
+    """
+
+    # N portfolio constituents
+    n = len(n_units)
+
+    # Get equal percent risk contribution (representing target 1SD move in each instrument)
+    equal_risk_contribution = np.array([1/n] * n) 
+
+    # Get portfolio dollar variance
+    variance = n_units.T.dot(cov).dot(n_units)
+    # Get weighted risk (respective dollar variance)    
+    weighted_dollar_risk = n_units.T.dot(cov) * n_units
+    # Get percent weighted risk contribution (percent contribution to variance)
+    percent_risk_contribution = weighted_dollar_risk / variance
+
+    # Check if the dollar risk contribution of current portfolio = equal_risk_contribution
+    # Measure the absolute difference between current vs. equal risk contribution
+    diff = np.abs((percent_risk_contribution - equal_risk_contribution)).sum()
+
+    return diff 
+
+def atr_risk_parity_obj(n_units: pd.Series, cov: pd.DataFrame) -> float:
+    """ Inspired by CTA and Trend Follwers' risk management practices, the ATR Risk Parity objective function
+        targets equal risk contribution (i.e., (True Range)^2 risk) which represents True Range of the 
+        underlying instrument's price movement. Here, the cov represents the parwise relationship between Asset 1's 
+        True Range & Asset 2's True Range, defining ATR-derived risk based on the correlation structure of the underlying portfolio
+        and mitigating over exposure to a single risk factor.
+               
+        Positions represent how many shares to purchase for a equal portfolio risk contribution as a function of True Range.
+        This follows the risk management practices of select portfolio managers that target equal risk allocation to each trade/position, 
+        but leverages stop-losses (e.g., 1 ATR stop) to limit exogenous risk exposure.
+
+        This follows the intuition behind traditional equal variance contribution risk parity algorithms, but defines risk as dollar value
+        at risk (e.g., stop loss set at 1 ATR) instead of purely variance.          
+
+    Args:
+        n_units (pd.Series): number of units (e.g., shares, contracts) to purchase per portfolio constituent. 
+        cov (pd.DataFrame): covariance matrix of portfolio constituents' prices.
+        target_risk (float): target percent risk per position.
+        portfoio_value (float): portfolio dollar value.
+
+    Returns:
+        float
+    """
+
+    # N portfolio constituents
+    n = len(n_units)
+
+    # Get equal percent risk contribution (representing target 1SD move in each instrument)
+    equal_risk_contribution = np.array([1/n] * n) 
+
+    # Get portfolio dollar variance
+    portfolio_true_range_risk = n_units.T.dot(cov).dot(n_units)
+    
+    # Get weighted risk (respective dollar variance)    
+    weighted_true_range_risk = n_units.T.dot(cov) * n_units
+    
+    # Get percent weighted risk contribution (percent contribution to variance)
+    percent_risk_contribution = weighted_true_range_risk / portfolio_true_range_risk
+
+    # Check if the dollar risk contribution of current portfolio = equal_risk_contribution
+    # Measure the absolute difference between current vs. equal risk contribution
+    diff = np.abs((percent_risk_contribution - equal_risk_contribution)).sum()
 
     return diff 
 
@@ -272,6 +360,147 @@ def risk_parity(returns: pd.DataFrame, type='Variance') -> pd.Series:
     w = pd.Series(w, index=cov.index)
 
     return w
+
+def dollar_risk_parity(prices: pd.DataFrame, target_risk = 0.001, portfoio_value = 100000, long_only=False) -> pd.Series:
+    """ Inspired by CTA and Trend Follwers' risk management practices, the Dollar Risk Parity optimization function
+        targets "target_risk" percent risk per position (equal risk contribution) which represents 1 SD of the 
+        underlying instrument's price movement. Here, the covariance and variance of each asset defines its risk to account for
+        correlation structures and mitiage over exposure to a single risk factor.
+               
+        Positions represent how many shares to purchase for a 1SD move in the underlying instrument 
+        to represent "target_risk" percent loss in "portfolio_value". This follows the risk management practices of 
+        select portfolio managers that target equal risk allocation to each trade/position, but leverages stop-losses 
+        (e.g., 1SD stop) to limit exogenous risk exposure.
+
+        This follows the intuition behind traditional equal variance contribution risk parity, but defines risk as dollar value
+        at risk (e.g., stop loss set at 1SD) instead of purely variance. 
+
+    Args:
+        prices (pd.DataFrame): _description_
+        target_risk (float, optional): _description_. Defaults to 0.005.
+        portfoio_value (int, optional): _description_. Defaults to 100000.
+
+    Returns:
+        pd.Series: _description_
+    """
+
+    # Determine risk definition
+    objective_function = dollar_risk_parity_obj
+
+    n = len(prices.columns)
+
+    # Covariance of prices
+    cov = prices.cov() 
+
+    initial_guess = pd.Series(np.array([1/n] * n), index=prices.columns)
+
+    constraints =   [# Ensure notional exposure < portfolio_value (i.e., no leverage)
+                    {"type": "ineq", "fun": lambda n_units: portfoio_value - (n_units*prices.iloc[-1]).sum()}
+                    ]
+
+    # Long-Only or L/S
+    if long_only:
+        bounds = Bounds(0, np.inf)
+        # bounds = Bounds(0, 10000000000)
+    else:
+        bounds = Bounds(-np.inf, np.inf)
+        # bounds = Bounds(-10000000000, 10000000000)
+    
+    # Get dollar risk parity weights
+    n_units = opt(objective_function, 
+            initial_guess, 
+            bounds=bounds,
+            args=(cov),
+            method='SLSQP',
+            constraints=constraints)['x']
+
+    n_units = pd.Series(n_units, index=cov.index)
+
+    ex_ante_dollar_vol = np.sqrt(n_units.T.dot(cov).dot(n_units))
+    print(f"Target Portfolio Risk: {portfoio_value*n*target_risk}")
+    
+    risk_scalar = portfoio_value*n*target_risk / ex_ante_dollar_vol
+
+    n_units *= risk_scalar
+    ex_ante_scaled_dollar_vol = np.sqrt(n_units.T.dot(cov).dot(n_units))
+    print(f"Ex-Ante Portfolio Risk: {ex_ante_scaled_dollar_vol}")
+    print(f"Ex-Ante Dollar Risk Contributions: \n{(n_units.T.dot(cov) *  n_units)**.5}" )
+
+    return n_units
+
+
+def atr_risk_parity(prices: pd.DataFrame, true_ranges: pd.DataFrame, target_risk = 0.001, portfoio_value = 100000, long_only=False) -> pd.Series:
+    """ Inspired by CTA and Trend Follwers' risk management practices, the Dollar Risk Parity optimization function
+        targets "target_risk" percent risk per position (equal risk contribution) which represents 1 SD of the 
+        underlying instrument's price movement. Here, the covariance and variance of each asset defines its risk to account for
+        correlation structures and mitiage over exposure to a single risk factor.
+               
+        Positions represent how many shares to purchase for a 1SD move in the underlying instrument 
+        to represent "target_risk" percent loss in "portfolio_value". This follows the risk management practices of 
+        select portfolio managers that target equal risk allocation to each trade/position, but leverages stop-losses 
+        (e.g., 1SD stop) to limit exogenous risk exposure.
+
+        This follows the intuition behind traditional equal variance contribution risk parity, but defines risk as dollar value
+        at risk (e.g., stop loss set at 1SD) instead of purely variance. 
+
+    Args:
+        prices (pd.DataFrame): _description_
+        target_risk (float, optional): _description_. Defaults to 0.005.
+        portfoio_value (int, optional): _description_. Defaults to 100000.
+
+    Returns:
+        pd.Series: _description_
+    """
+
+    # Determine risk definition
+    objective_function = atr_risk_parity_obj
+
+    n = len(prices.columns)
+
+    # Covariance of prices
+    cov = dp.true_range_covariance(true_ranges, lookback_window=20) 
+
+    initial_guess = pd.Series(np.array([1/n] * n), index=prices.columns)
+
+    constraints =   [# Notional exposure < portfolio_value (i.e., no leverage)
+                    {"type": "ineq", "fun": lambda n_units: portfoio_value - prices.iloc[-1].dot(n_units)},
+                    # Target Risk Level - Doesn't Work - Scale Risk After Opt Instead
+                    # {"type": "eq", "fun": lambda n_units: np.sqrt(n_units.T.dot(cov).dot(n_units)) - portfoio_value*n*target_risk}
+                    ]
+
+    # Long-Only or L/S
+    if long_only:
+        bounds = Bounds(0, np.inf)
+        # bounds = Bounds(0, 10000000000)
+    else:
+        bounds = Bounds(-np.inf, np.inf)
+        # bounds = Bounds(-10000000000, 10000000000)
+    
+    # Get dollar risk parity weights
+    n_units = opt(objective_function, 
+            initial_guess, 
+            bounds=bounds,
+            args=(cov),
+            method='SLSQP',
+            constraints=constraints)['x']
+
+    n_units = pd.Series(n_units, index=cov.index)
+
+    # Target Portfolio Risk
+    ex_ante_true_range_risk = np.sqrt(n_units.T.dot(cov).dot(n_units)) 
+    risk_scalar = portfoio_value*n*target_risk / ex_ante_true_range_risk
+    n_units *= risk_scalar
+
+    # Control for Leverage -- alternative is to impose this in the convex optimization constraints
+    leverage_scalar = portfoio_value / prices.iloc[-1].dot(n_units)
+    n_units *= leverage_scalar
+    
+    ex_ante_true_range_risk = np.sqrt(n_units.T.dot(cov).dot(n_units))
+    print(f"Target Portfolio Risk: {portfoio_value*n*target_risk}")
+    print(f"Ex-Ante True Range Dollar Risk: {ex_ante_true_range_risk}")
+    print(f"Ex-Ante True Range Risk Contributions: \n{(n_units.T.dot(cov) *  n_units)**.5}" )
+
+    return n_units
 
 def dpo(returns: pd.DataFrame, long_only=False, constrained=True, max_position_weight=1, vol_target=None) -> pd.Series:
     """ Executes constrained convex portfolio optimization to generate optimal
