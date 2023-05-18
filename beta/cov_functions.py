@@ -4,17 +4,18 @@ matrix function, allowing you to run any risk model from one function.
 
 Supported Estimation Algorithms:
 1) Empirical/Historical Covariance
-2) Exponentially Weighted Covariance
-3) Shrunken Exponentially Weighted Covariance
-4) Shrunken Empirical Covariance
+2) Shrunken Empirical Covariance
+3) Trailing Covariance
+4) Shrunken Trailing Covariance
+5) Exponentially Weighted Covariance
+6) Shrunken Exponentially Weighted Covariance
+
 
 Future Estimation Algorithms:
-1) Empirical/Historical Covariance
-2) Exponentially Weighted Covariance
-3) Ledoit-Wolf Shrunken Covariance
-4) De-Toning / Constant Residual Eigenvalue Method (MLDP)
-5) RMT / RIE / Marcenko-Pastur EPO Risk Model
-6) DDC Multivariate GARCH Covariance
+1) Ledoit-Wolf Shrunken Covariance
+2) De-Toning / Constant Residual Eigenvalue Method (MLDP)
+3) RMT / RIE / Marcenko-Pastur EPO Risk Model
+4) DDC Multivariate GARCH Covariance
 
 '''
 

@@ -1,5 +1,5 @@
 '''
-Library for portfolio optimization objective functions.
+Library for portfolio optimization objective/cost functions.
 
 '''
 

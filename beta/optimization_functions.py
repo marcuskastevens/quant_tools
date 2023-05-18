@@ -16,6 +16,8 @@ Future Optimization Algorithms:
 5) NCO
 6) Min Entropic VaR / Minimum Kurtosis Portfolios
 7) Max Sortino 
+8) Max Return + Risk Aversion
+9) Max Return + Risk Aversion + Turnover Aversion
 '''
 
 
