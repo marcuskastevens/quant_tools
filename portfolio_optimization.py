@@ -1,10 +1,17 @@
 '''
 Library for portfolio optimization.
 
+Future Structure:
+
+- obj_functions.py [all types of optimization objective functions]
+- covaraince_functions.py [robust covariance estimation functions]
+- optimization_functions.py [all types of optimization methods functionalized]
+- portfolio_optimization.py [single class to handle all types of optimization, rebal timing luck stress test]
+
 '''
 
 from scipy.optimize import minimize as opt
-from backtest_tools import risk_analysis as ra, portfolio_tools as pt, data_preprocessing as dp
+from quant_tools import risk_analysis as ra, performance_analysis as pt, data_preprocessing as dp
 from scipy.optimize import Bounds
 import statsmodels.api as sm
 from scipy import stats
@@ -12,10 +19,9 @@ import pandas as pd
 import numpy as np
 
 
-
 # ------------------------------------------------------------------------- Objective Functions -------------------------------------------------------------------------
 
-def portfolio_sharpe_ratio(asset_weights, expected_returns, cov_matrix, neg = True):
+def sharpe_ratio_obj(asset_weights, expected_returns, cov_matrix, neg = True):
     """ Compute portfolio Sharpe Ratio based on asset weights, returns, and covariance matrix.
 
     Args:
@@ -36,7 +42,7 @@ def portfolio_sharpe_ratio(asset_weights, expected_returns, cov_matrix, neg = Tr
     
     return sharpe_ratio
 
-def portfolio_dasr(w: pd.Series, returns: pd.DataFrame, neg = True) ->  float:
+def dasr_obj(w: pd.Series, returns: pd.DataFrame, neg = True) ->  float:
     """ Computes DASR of weighted portfolio.
 
     Args:
@@ -82,10 +88,10 @@ def risk_parity_obj(w: pd.Series, cov: pd.DataFrame) -> float:
     variance = w.T.dot(cov).dot(w)
 
     # Get weighted asbolute risk
-    weighted_absolute_risk = w.T.dot(cov) * w
+    weighted_absolute_risk_contribution = w.T.dot(cov) * w
 
     # Get each constituent's proportion risk contribution
-    risk_contribution = weighted_absolute_risk / variance
+    risk_contribution = weighted_absolute_risk_contribution / variance
 
     # Measure the absolute difference between current vs. equal risk contribution
     diff = np.abs((risk_contribution - equal_risk_contribution)).sum()
@@ -124,14 +130,16 @@ def dollar_risk_parity_obj(n_units: pd.Series, cov: pd.DataFrame) -> float:
 
     # Get portfolio dollar variance
     variance = n_units.T.dot(cov).dot(n_units)
+    
     # Get weighted risk (respective dollar variance)    
-    weighted_dollar_risk = n_units.T.dot(cov) * n_units
+    weighted_absolute_risk_contribution = n_units.T.dot(cov) * n_units
+    
     # Get percent weighted risk contribution (percent contribution to variance)
-    percent_risk_contribution = weighted_dollar_risk / variance
+    risk_contribution = weighted_absolute_risk_contribution / variance
 
     # Check if the dollar risk contribution of current portfolio = equal_risk_contribution
     # Measure the absolute difference between current vs. equal risk contribution
-    diff = np.abs((percent_risk_contribution - equal_risk_contribution)).sum()
+    diff = np.abs((risk_contribution - equal_risk_contribution)).sum()
 
     return diff 
 
@@ -169,14 +177,14 @@ def atr_risk_parity_obj(n_units: pd.Series, cov: pd.DataFrame) -> float:
     portfolio_true_range_risk = n_units.T.dot(cov).dot(n_units)
     
     # Get weighted risk (respective dollar variance)    
-    weighted_true_range_risk = n_units.T.dot(cov) * n_units
+    weighted_true_range_risk_contribution = n_units.T.dot(cov) * n_units
     
     # Get percent weighted risk contribution (percent contribution to variance)
-    percent_risk_contribution = weighted_true_range_risk / portfolio_true_range_risk
+    risk_contribution = weighted_true_range_risk_contribution / portfolio_true_range_risk
 
     # Check if the dollar risk contribution of current portfolio = equal_risk_contribution
     # Measure the absolute difference between current vs. equal risk contribution
-    diff = np.abs((percent_risk_contribution - equal_risk_contribution)).sum()
+    diff = np.abs((risk_contribution - equal_risk_contribution)).sum()
 
     return diff 
 
@@ -233,7 +241,7 @@ def mvo(hist_returns: pd.DataFrame, expected_returns: pd.DataFrame, long_only = 
                             # SUM(ABS(SHORTS)) = C * SUM(LONGS)
                             ]
 
-            mvo_weights = pd.Series(opt(portfolio_sharpe_ratio, 
+            mvo_weights = pd.Series(opt(sharpe_ratio_obj, 
                     initial_guess,
                     args=(expected_returns, cov_matrix), 
                     method='SLSQP', 
@@ -247,7 +255,7 @@ def mvo(hist_returns: pd.DataFrame, expected_returns: pd.DataFrame, long_only = 
                             {"type": "eq", "fun": lambda w: np.sqrt(np.dot(np.dot(w.T, cov_matrix), w)) - vol_target},
                            ]
 
-            mvo_weights = pd.Series(opt(portfolio_sharpe_ratio, 
+            mvo_weights = pd.Series(opt(sharpe_ratio_obj, 
                     initial_guess,
                     args=(expected_returns, cov_matrix), 
                     method='SLSQP', 
@@ -257,7 +265,7 @@ def mvo(hist_returns: pd.DataFrame, expected_returns: pd.DataFrame, long_only = 
 
         else:
 
-            mvo_weights = pd.Series(opt(portfolio_sharpe_ratio, 
+            mvo_weights = pd.Series(opt(sharpe_ratio_obj, 
             initial_guess,
             args=(expected_returns, cov_matrix), 
             method='SLSQP')['x']
@@ -280,7 +288,7 @@ def mvo(hist_returns: pd.DataFrame, expected_returns: pd.DataFrame, long_only = 
             print(f'Long-Short Ratio: {ls_ratio}')
             print(f'Leverage: {mvo_weights.abs().sum()}')
             print(f'Sum of Vol Weights: {mvo_weights.sum().round(4)}')
-            mvo_sr = portfolio_sharpe_ratio(mvo_weights, expected_returns, cov_matrix, neg=False)
+            mvo_sr = sharpe_ratio_obj(mvo_weights, expected_returns, cov_matrix, neg=False)
             print(f'Target Portfolio Sharpe Ratio: {mvo_sr}')
         
         return mvo_weights
@@ -315,12 +323,12 @@ def unconstrained_mvo(hist_returns: pd.DataFrame, expected_returns: pd.Series):
     print(f'Long-Short Ratio: {ls_ratio}')
     print(f'Leverage: {mvo_weights.abs().sum()}')
     print(f'Sum of Vol Weights: {mvo_weights.sum().round(4)}') 
-    mvo_sr = portfolio_sharpe_ratio(mvo_weights, expected_returns, cov_matrix, neg=False)
+    mvo_sr = sharpe_ratio_obj(mvo_weights, expected_returns, cov_matrix, neg=False)
     print(f'Target Portfolio Sharpe Ratio: {mvo_sr}')   
     
     return mvo_weights
 
-def risk_parity(returns: pd.DataFrame, type='Variance') -> pd.Series:
+def risk_parity(returns: pd.DataFrame, type='Variance', long_only=False) -> pd.Series:
     """ Generalized Risk Parity portfolio construction algorithm to 
         get equal risk contribution portfolio weights across various defintions
         of risk. 
@@ -346,6 +354,14 @@ def risk_parity(returns: pd.DataFrame, type='Variance') -> pd.Series:
 
     initial_guess = pd.Series(np.array([1/n] * n), index=returns.columns)
 
+    # Long-Only or L/S
+    if long_only:
+        bounds = Bounds(0, 1)
+        # bounds = Bounds(0, 10000000000)
+    else:
+        bounds = Bounds(-1, 1)
+        # bounds = Bounds(-10000000000, 10000000000)
+
     constraints =   [# Portfolio weights sum to 100%
                     {"type": "eq", "fun": lambda w: w.sum() - 1}
                     ]
@@ -355,9 +371,12 @@ def risk_parity(returns: pd.DataFrame, type='Variance') -> pd.Series:
                 initial_guess, 
                 args=(cov), 
                 method='SLSQP',
+                bounds=bounds,
                 constraints=constraints)['x']
 
     w = pd.Series(w, index=cov.index)
+
+    w /= w.sum()
 
     return w
 
@@ -429,7 +448,7 @@ def dollar_risk_parity(prices: pd.DataFrame, target_risk = 0.001, portfoio_value
     return n_units
 
 
-def atr_risk_parity(prices: pd.DataFrame, true_ranges: pd.DataFrame, target_risk = 0.001, portfoio_value = 100000, long_only=False) -> pd.Series:
+def atr_risk_parity(prices: pd.DataFrame, true_ranges: pd.DataFrame, lookback_window=20, target_risk = 0.001, portfoio_value = 100000, long_only=False) -> pd.Series:
     """ Inspired by CTA and Trend Follwers' risk management practices, the Dollar Risk Parity optimization function
         targets "target_risk" percent risk per position (equal risk contribution) which represents 1 SD of the 
         underlying instrument's price movement. Here, the covariance and variance of each asset defines its risk to account for
@@ -458,7 +477,7 @@ def atr_risk_parity(prices: pd.DataFrame, true_ranges: pd.DataFrame, target_risk
     n = len(prices.columns)
 
     # Covariance of prices
-    cov = dp.true_range_covariance(true_ranges, lookback_window=20) 
+    cov = dp.true_range_covariance(true_ranges, lookback_window=lookback_window)
 
     initial_guess = pd.Series(np.array([1/n] * n), index=prices.columns)
 
@@ -492,13 +511,15 @@ def atr_risk_parity(prices: pd.DataFrame, true_ranges: pd.DataFrame, target_risk
     n_units *= risk_scalar
 
     # Control for Leverage -- alternative is to impose this in the convex optimization constraints
-    leverage_scalar = portfoio_value / prices.iloc[-1].dot(n_units)
-    n_units *= leverage_scalar
+    if prices.iloc[-1].dot(n_units) > portfoio_value:
+        print('Leverage Constraint Used')
+        leverage_scalar = portfoio_value / prices.iloc[-1].dot(n_units)
+        n_units *= leverage_scalar
     
     ex_ante_true_range_risk = np.sqrt(n_units.T.dot(cov).dot(n_units))
     print(f"Target Portfolio Risk: {portfoio_value*n*target_risk}")
     print(f"Ex-Ante True Range Dollar Risk: {ex_ante_true_range_risk}")
-    print(f"Ex-Ante True Range Risk Contributions: \n{(n_units.T.dot(cov) *  n_units)**.5}" )
+    print(f"Ex-Ante True Range Risk Contributions: \n{(n_units.T.dot(cov) *  n_units)**.5}")
 
     return n_units
 
@@ -549,7 +570,7 @@ def dpo(returns: pd.DataFrame, long_only=False, constrained=True, max_position_w
         constraints =  []
     
     # Get optimized weights
-    w = pd.Series(opt(portfolio_dasr, 
+    w = pd.Series(opt(dasr_obj, 
                             w,
                             args=(returns), 
                             method='SLSQP',
@@ -594,3 +615,47 @@ def multistrategy_portfolio_optimization(multistrategy_portfolio: pd.DataFrame, 
     multistrategy_portfolio_optimized_returns = (multistrategy_portfolio*w.shift(2)).sum(1).dropna()
 
     return multistrategy_portfolio_optimized_returns, w
+
+def rebal_timing_luck_multistrategy_test(multistrategy_portfolio: pd.DataFrame, rebal_freq: int, lookback_window: int, optimization = 'DPO', increment=3):
+    """ Conduct rebalancing timing luck robustness tests. Increment rebalancing day by "increment" for each optimization. This generates ample sample size across different rebal
+        times of the month. 
+
+    Args:
+        multistrategy_portfolio (pd.DataFrame): _description_
+        rebal_freq (int): _description_
+        lookback_window (int): _description_
+        optimization (str, optional): _description_. Defaults to 'DPO'.
+        increment (int, optional): _description_. Defaults to 3.
+
+    Returns:
+        (pd.DataFrame, pd.DataFrame): (rebal-day agnositc multistrategy returns, average multistrategy performance summary)
+    """
+    
+    multistrategy_returns = {}
+    multistrategy_weights = {}
+
+    # Run optimizations with varying rebal days
+    if optimization == 'DPO':
+    
+        for i in np.arange(20)[::increment]:
+            multistrategy_returns[f'{i} Day Shift'], multistrategy_weights[f'{i} Day Shift'] = opt.multistrategy_portfolio_optimization(multistrategy_portfolio=multistrategy_portfolio.shift(i), rebal_freq=rebal_freq, lookback_window=lookback_window, optimization = optimization, max_position_weight=1)
+
+    elif optimization == 'MVO':
+        
+        for i in np.arange(20)[::increment]:
+            multistrategy_returns[f'{i} Day Shift'], multistrategy_weights[f'{i} Day Shift'] = opt.multistrategy_portfolio_optimization(multistrategy_portfolio=multistrategy_portfolio.shift(i), rebal_freq=rebal_freq, lookback_window=lookback_window, optimization = optimization, vol_target=.01, max_position_weight=1)
+    
+    # Transform hash table to pd.DataFrame
+    multistrategy_returns = pd.DataFrame(multistrategy_returns)
+
+    # Compute average multistrategy performance across all rebal days
+    timing_luck_performance_summary = pd.DataFrame()
+
+    for i, rets in multistrategy_returns.items():
+
+        timing_luck_performance_summary = pd.concat([performance_summary(rets), timing_luck_performance_summary], axis=1)
+
+    # Average performance metrics
+    timing_luck_performance_summary.mean(axis=1)
+
+    return multistrategy_returns, timing_luck_performance_summary

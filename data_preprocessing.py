@@ -1,28 +1,26 @@
 import numpy as np
 import pandas as pd
 from pandas_ta.overlap import ma
+from quant_tools import performance_analysis as pa
 
-def drop_outlier_returns(returns: pd.DataFrame, daily_ret_threshold=20) -> pd.DataFrame:
-    """ Drops securities that have abnormal returns. This is a data cleansing excercise that controls for potential data errors or 
-        obscure events.
+
+def scale_vol(strategy_returns: pd.Series, target_vol = .10) -> pd.Series:
+    """ Scale strategy returns to a target volatility.
 
     Args:
-        returns (pd.DataFrame): returns of multiple securities
-        daily_ret_threshold (int, optional): max daily allowable return across all securities. Defaults to 20.
+        strategy_returns (pd.Series): time-series of returns.
+        target_vol (float, optional): targeted volatility for strategy. Defaults to .10.
 
     Returns:
-        pd.DataFrame: all securities with acceptable daily returns. 
+        pd.Series: volatility scaled strategy returns
     """
+    # Use vol_scalar to multiply strategy_returns by to realize target_vol
+    vol_scalar = target_vol / pa.vol(strategy_returns = strategy_returns)
     
-    # Drop all tickers whose returns were over a particlular threshold in a single day
-    drop_index = np.where(returns.abs()>daily_ret_threshold)[1] # get second part of np.array since that indicates the tickers
-    
-    # Identify tickers to be dropped
-    tickers = returns.iloc[:, drop_index].columns
-    
-    print(f'Dropped tickers: {tickers}')
+    # Scale returns
+    strategy_returns = strategy_returns * vol_scalar
 
-    return returns.drop(columns=tickers)
+    return strategy_returns
 
 
 def volatility_filter(returns: pd.DataFrame, p=0.50, filter_type='high_vol') -> pd.DataFrame:
