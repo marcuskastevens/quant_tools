@@ -1,5 +1,5 @@
 '''
-Library for portfolio optimization.
+Library for walk-forward portfolio optimization.
 
 Current Implementations:
 1) Generalized Class for Portfolio Optimization
@@ -9,7 +9,7 @@ Current Implementations:
 
 
 from quant_tools import risk_analysis as ra, performance_analysis as pt, data_preprocessing as dp
-from quant_tools.beta import optimization_functions
+from quant_tools.beta import opt_functions as opt, cov_functions as risk_models
 from scipy.optimize import Bounds
 import statsmodels.api as sm
 from scipy import stats
@@ -17,28 +17,29 @@ import pandas as pd
 import numpy as np
 
 
-class walk_portfolio_optimization():
-    def __init__(self, hist_returns: pd.DataFrame, rebal_freq: int, optimization_type: str, cov_type: str, args: tuple):
+class walk_forward_portfolio_optimization():
+    def __init__(self, hist_returns: pd.DataFrame, args: tuple, rebal_freq: int = 21, optimization_method: str = "Max Sharpe Ratio", cov_method: str = "ewma_cov"):
         
         self.hist_returns = hist_returns     
         self.expected_returns = self.hist_returns.rolling(252).mean() # self.get_expected_returns(self.hist_returns) -- perhaps user passes these into function
         self.rebal_freq = rebal_freq
-        self.optimization_type = optimization_type
-        self.cov_type = cov_type
+        self.optimization_method = optimization_method
+        self.cov_method = cov_method
         # self.constraints -- implement later
 
-        self.optimization_algo_map = {  "Unconstrained Max Sharpe Ratio" : optimization_functions.unconstrained_max_sharpe_mvo,
-                                        "Max Sharpe Ratio" : optimization_functions.max_sharpe_mvo,
-                                        "Risk Parity" : optimization_functions.risk_parity, 
-                                        "Dollar Risk Parity" : optimization_functions.dollar_risk_parity,
-                                        "ATR Risk Parity" : optimization_functions.atr_risk_parity,
+        self.optimization_algo_map = {  "Unconstrained Max Sharpe Ratio" : opt.unconstrained_max_sharpe_mvo,
+                                        "Max Sharpe Ratio" : opt.max_sharpe_mvo,
+                                        "Risk Parity" : opt.risk_parity, 
+                                        "Dollar Risk Parity" : opt.dollar_risk_parity,
+                                        "ATR Risk Parity" : opt.atr_risk_parity,
                                      }
         
-        self.optimization_algo = self.optimization_algo_map[self.optimization_type]
+        self.optimization_algo = self.optimization_algo_map[self.optimization_method]
+
+        self.cov_algo = risk_models.risk_matrix[cov_method]
 
         if args:
-            self.args = args # self.clean_args(args=args) 
-            print(self.args)
+            self.args = args
         else:
             self.args = {   "long_only": False,
                             "vol_target": 0.01,
@@ -51,7 +52,7 @@ class walk_portfolio_optimization():
             
         self.w = self.run()
     
-    def clean_args(self, args: dict) -> None:
+    def clean_args(self, args: dict) -> dict:
                 
         # Get opt function args
         supported_args = list(self.optimization_algo.__code__.co_varnames[:self.optimization_algo.__code__.co_argcount])
@@ -59,7 +60,7 @@ class walk_portfolio_optimization():
         # Drop unsupported args
         unsupported_args = [key for key in args.keys() if key not in supported_args]
         if len(unsupported_args) > 0: 
-            print(f"{unsupported_args} are not supported args in the {self.optimization_type} optimization function!")
+            print(f"{unsupported_args} are not supported args in the {self.optimization_method} optimization function!")
             print(f"Supported args are {supported_args}.")
             for key in unsupported_args:
                 del args[key]
@@ -70,7 +71,7 @@ class walk_portfolio_optimization():
         # Check if all required args are defined
         missing_required_args = [key for key in required_args if key not in args.keys()]
         if len(missing_required_args) > 0:
-            raise TypeError(f"{self.optimization_type} optimization function missing required argument(s):\n{missing_required_args}")
+            raise TypeError(f"{self.optimization_method} optimization function missing required argument(s):\n{missing_required_args}")
         
         return args
     
@@ -103,7 +104,7 @@ class walk_portfolio_optimization():
             
         return w
     
-    def get_cov(self, hist_returns: pd.DataFrame, cov_type: str):
+    def get_cov(self, hist_returns: pd.DataFrame, cov_method: str):
         # implement library later
         cov = hist_returns.cov()
         return cov

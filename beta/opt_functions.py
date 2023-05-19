@@ -30,7 +30,7 @@ from scipy import stats
 import pandas as pd
 import numpy as np
 
-# ------------------------------------------------------------------------- Optimization Functions -------------------------------------------------------------------------
+# -------------------------------- Optimization Functions --------------------------------
 
 def unconstrained_max_sharpe_mvo(hist_returns: pd.DataFrame, expected_returns: pd.Series, verbose: bool = False) -> pd.Series:
     """ Implements MVO closed-form solution for maximizing Sharpe Ratio.
