@@ -37,7 +37,6 @@ import json
 import pickle
 import hashlib
 from typing import Any
-from types import MappingProxyType
 from functools import singledispatch
 
 # External dependencies
@@ -45,13 +44,27 @@ import numpy as np
 import pandas as pd
 
 
-def stable_hash(obj: Any, *, algo: str = "blake2b", digest_size: int = 16) -> str:
+def stable_hash(
+    *args: Any,
+    algo: str = "blake2b",
+    digest_size: int = 16,
+    **kwargs: Any,
+) -> str:
     """
-    Returns a hex digest that is identical across sessions and machines as long as the raw content of obj is identical.
+    Calculates a deterministic hex digest for any number of objects.
+    Returns a lower-case hexadecimal digest representing all provided inputs.
     """
 
     hasher = _new_hasher(algo, digest_size)
-    _feed(hasher, obj)
+
+    # Feed positional args in sequence
+    for obj in args:
+        _feed(hasher, obj)
+
+    # Feed keyword args in sorted key order
+    for key in sorted(kwargs):
+        _feed(hasher, key)
+        _feed(hasher, kwargs[key])
 
     return hasher.hexdigest()
 
@@ -64,7 +77,9 @@ def _new_hasher(algo: str, digest_size: int):
 
 @singledispatch
 def _feed(hasher, obj):  # type: ignore[override]
-    """Update *hasher* with a canonical byte‑view of *obj* (generic fallback)."""
+    """
+    Update hasher with a canonical byte‑view of obj (generic fallback).
+    """
     # First try cheap JSON serialisation (handles int, float, str, bool, None)
     try:
         data = json.dumps(obj, sort_keys=True, separators=(",", ":")).encode()
@@ -132,9 +147,18 @@ def _df_feed(hasher, df: pd.DataFrame):
     _feed(hasher, df.to_numpy(copy=False))
 
 
-@_feed.register(object)  # *last* catch‑all for any remaining instance
-def _obj_feed(hasher, obj):
-    cls = obj.__class__
-    hasher.update(f"class:{cls.__module__}.{cls.__qualname__}".encode())
-    # MappingProxyType protects against mutation while hashing
-    _feed(hasher, MappingProxyType(vars(obj)))
+def main() -> None:
+
+    x: np.ndarray = np.random.rand(100, 100)
+    y: pd.DataFrame = pd.DataFrame(x)
+
+    print(stable_hash(x))
+    print(stable_hash(y))
+    print(stable_hash(x, y))
+    print(stable_hash(x=x, y=y))
+
+    return
+
+
+if __name__ == "__main__":
+    main()
