@@ -1,16 +1,5 @@
 """
-Module implementing data utility funtions.
-
-Deterministic, session‑agnostic hashing for Python objects.
-
-Overview
---------
-This module exposes one public function::
-
-    stable_hash(obj, *, algo="blake2b", digest_size=16) -> str
-
-It returns a **hex digest** that is identical across Python sessions and
-machines as long as the raw *content* of *obj* is the same.
+Module implementing data utility funtions. Implements deterministic, session‑agnostic hashing for Python objects.
 
 Design requirements
 -------------------
@@ -40,16 +29,10 @@ user class        ``b"class" + qualname + …``   hashes the ``__dict__`` recurs
 fallback          ``b"pickle:" + pickle.dumps`` deterministic for a fixed CPython version
 ================= ============================== =====================================
 
-**Tip**
-    If you only need to hash the contents of *files* or blobs you can feed
-    their bytes directly to the digest and skip canonicalisation entirely.
-
-Register a new ``_feed`` handler via ``@_feed.register`` when custom data
-structures appear in your project.
+Register a new ``_feed`` handler via ``@_feed.register`` when custom data structures appear in your project.
 """
 
-from __future__ import annotations
-
+# Built-in dependencies
 import json
 import pickle
 import hashlib
@@ -57,13 +40,19 @@ from typing import Any
 from types import MappingProxyType
 from functools import singledispatch
 
+# External dependencies
 import numpy as np
 import pandas as pd
 
 
 def stable_hash(obj: Any, *, algo: str = "blake2b", digest_size: int = 16) -> str:
+    """
+    Returns a hex digest that is identical across sessions and machines as long as the raw content of obj is identical.
+    """
+
     hasher = _new_hasher(algo, digest_size)
     _feed(hasher, obj)
+
     return hasher.hexdigest()
 
 
